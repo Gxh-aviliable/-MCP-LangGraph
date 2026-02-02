@@ -348,7 +348,7 @@ class TripGraphSystem:
             ATTRACTION_AGENT_PROMPT,
             "景点专家",
             lambda state: (
-                f"你需要为城市：{state['city']} 寻找真实的景点信息。\n"
+                f"你需要根据城市：{state['city']} 和用户的兴趣偏好{state['interests']}来寻找真实的景点信息。\n"
                 f"**强制要求**：在调用完工具后，你必须将所有获取到的景点详细信息（名称、地址、经纬度、描述）"
                 f"整理成一个标准的 JSON 数组格式并放在回复的最后。"
                 f"不要只说‘找到了’，必须把数据写出来！"
