@@ -4,7 +4,7 @@ import operator
 import sys
 from pathlib import Path
 from typing import Annotated, List, TypedDict, Dict, Any, Optional  # ✅ 添加 Optional
-
+from datetime import datetime
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -38,6 +38,10 @@ ATTRACTION_AGENT_PROMPT = """你是景点搜索专家。你的任务是根据指
 - 你的逻辑: 提取 `keywords="历史古迹"`, `city="北京"` -> 发起原生工具调用请求。
 - 用户: "上海有什么适合散步的公园？"
 - 你的逻辑: 提取 `keywords="公园"`, `city="上海"` -> 发起原生工具调用请求。
+
+**重要格式要求**:
+你必须在回复的最后，将所有搜集到的景点信息整理成一个标准的 JSON 数组格式。
+严禁只给文字描述。JSON 数组必须包含在 [ ] 中。
 
 **最终目标:**
 你的输出应当基于工具返回的原始数据进行整合，为用户提供包括名称、精确地址、经纬度和景点描述的结构化信息。
@@ -339,14 +343,19 @@ class TripGraphSystem:
         
         # 景点专家节点
         workflow.add_node(
-            "attraction_expert",
-            self._create_agent_node(
-                ATTRACTION_AGENT_PROMPT,
-                "景点专家",
-                lambda state: f"你需要为城市：{state['city']} 寻找真实的景点信息。用户兴趣是：{', '.join(state['interests'])}。请务必使用 maps_text_search 工具获取最新数据，严禁凭记忆回答,请返回 JSON 格式的景点列表。",
-                "attractions_data"  # 指定输出键
-            )
-        )
+        "attraction_expert",
+        self._create_agent_node(
+            ATTRACTION_AGENT_PROMPT,
+            "景点专家",
+            lambda state: (
+                f"你需要为城市：{state['city']} 寻找真实的景点信息。\n"
+                f"**强制要求**：在调用完工具后，你必须将所有获取到的景点详细信息（名称、地址、经纬度、描述）"
+                f"整理成一个标准的 JSON 数组格式并放在回复的最后。"
+                f"不要只说‘找到了’，必须把数据写出来！"
+            ),
+            "attractions_data"
+    )
+)
         
         # 天气专家节点
         workflow.add_node(
@@ -376,7 +385,7 @@ class TripGraphSystem:
                 print("\n📋 规划专家正在整合行程...")
                 
                 # ✅ 计算旅程天数
-                from datetime import datetime
+
                 start = datetime.strptime(state['start_date'], '%Y-%m-%d')
                 end = datetime.strptime(state['end_date'], '%Y-%m-%d')
                 trip_days = (end - start).days + 1
