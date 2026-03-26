@@ -19,7 +19,7 @@ from backend.prompts import (
     INTENT_PARSER_PROMPT,
     ADJUSTMENT_PROMPT,
 )
-from backend.model.schemas import TripPlan
+from backend.model import TripPlan
 from backend.config.settings import settings
 
 

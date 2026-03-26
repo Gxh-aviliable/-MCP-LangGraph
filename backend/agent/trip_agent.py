@@ -31,7 +31,7 @@ from backend.agent.nodes import (
     parse_intent_node,
     adjust_plan_node,
 )
-from backend.model.schemas import TripPlan, TripRequest
+from backend.model import TripPlan, TripRequest
 from backend.config.settings import settings
 
 # 设置环境变量

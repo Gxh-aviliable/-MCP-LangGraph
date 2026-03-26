@@ -95,7 +95,7 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
     "total_meals": 300,
     "total": 900
   }}
-}
+}}
 ```
 
 **重要提示:**
@@ -138,7 +138,7 @@ INTENT_PARSER_PROMPT = """你是用户意图解析专家。分析用户对旅行
 
 **示例**:
 用户反馈: "第一天景点有点多，第二天空闲时间多一些"
-输出: {"intent": "modify_attractions", "target_days": [0, 1], "action": "adjust_time", "details": "第一天减少景点，第二天增加景点", "reasoning": "用户希望平衡两天的行程密度"}
+输出: {{"intent": "modify_attractions", "target_days": [0, 1], "action": "adjust_time", "details": "第一天减少景点，第二天增加景点", "reasoning": "用户希望平衡两天的行程密度"}}
 """
 
 ADJUSTMENT_PROMPT = """你是行程调整专家。根据用户意图调整现有行程。
