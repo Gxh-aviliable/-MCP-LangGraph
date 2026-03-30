@@ -36,7 +36,7 @@ class Hotel(BaseModel):
     address: str = Field(default="",description="酒店地址")
     location: Optional[Location] = Field(default=None,description="酒店位置")
     price_range: str = Field(default="",description="价格范围")
-    rating: str = Field(default="",description="评分")
+    rating: Optional[float] = Field(default=None,ge=0,le=5,description="评分")
     distance: str = Field(default="",description="距离景点距离")
     type: str = Field(default="",description="酒店类型")
     estimated_cost: int = Field(default=0,description="预估费用(元/晚)")
@@ -108,3 +108,9 @@ class TripRequest(BaseModel):
     budget_per_day: Optional[int] = Field(default=None, description="每日预算(元)")
     accommodation_type: Optional[str] = Field(default=None, description="住宿类型")
     transportation_mode: Optional[str] = Field(default=None, description="交通方式")
+
+
+class FeedbackRequest(BaseModel):
+    """反馈请求 - 用于多轮对话"""
+    session_id: str = Field(..., description="会话ID")
+    message: str = Field(..., description="用户反馈消息")
