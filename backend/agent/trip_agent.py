@@ -487,6 +487,12 @@ class TripChatSession(ChatSession):
         return json.dumps(plan, ensure_ascii=False, indent=2)
 
 
+# ===================== 兼容旧版本别名 =====================
+
+# 旧版本类名别名，保持向后兼容
+TripChatSystem = ChatAgentSystem
+
+
 # ===================== 交互式主程序 =====================
 
 async def interactive_main():
