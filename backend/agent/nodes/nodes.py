@@ -134,14 +134,39 @@ def create_expert_node(
     Returns:
         异步节点函数
     """
+    # 过滤出该专家需要的特定工具
+    tool_name_map = {t.name: t for t in tools}
+
+    # 根据节点类型选择合适的工具
+    if "景点" in node_name or "attraction" in output_key:
+        # 景点专家只需要 maps_text_search
+        filtered_tools = [tool_name_map.get("maps_text_search", tools[0])]
+    elif "天气" in node_name or "weather" in output_key:
+        # 天气专家只需要 maps_weather
+        filtered_tools = [tool_name_map.get("maps_weather", tools[0])]
+    elif "酒店" in node_name or "hotel" in output_key:
+        # 酒店专家只需要 maps_text_search
+        filtered_tools = [tool_name_map.get("maps_text_search", tools[0])]
+    else:
+        filtered_tools = tools
+
+    print(f"[DEBUG] {node_name} 使用工具: {[t.name for t in filtered_tools]}")
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("user", "{input}"),
         MessagesPlaceholder(variable_name="agent_scratchpad"),
     ])
 
-    agent = create_tool_calling_agent(llm, tools, prompt)
-    executor = AgentExecutor(agent=agent, tools=tools, verbose=settings.debug)
+    agent = create_tool_calling_agent(llm, filtered_tools, prompt)
+    # 强制必须调用工具
+    executor = AgentExecutor(
+        agent=agent,
+        tools=filtered_tools,
+        verbose=settings.debug,
+        max_iterations=5,  # 限制迭代次数，防止无限循环
+        handle_parsing_errors=True  # 处理解析错误
+    )
 
     async def node(state: ChatAgentState) -> Dict[str, Any]:
         try:
@@ -158,6 +183,8 @@ def create_expert_node(
 
         except Exception as e:
             print(f"[FAIL] {node_name} 错误: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {output_key: [], "execution_errors": [f"{node_name}: {str(e)}"]}
 
     return node
@@ -170,7 +197,13 @@ def create_attraction_node(llm, tools):
         tools=tools,
         system_prompt=ATTRACTION_AGENT_PROMPT,
         node_name="景点专家",
-        prepare_input=lambda s: f"城市: {s['city']}, 兴趣: {s['interests']}。返回 JSON 数组格式的景点信息。",
+        prepare_input=lambda s: f"""请搜索 {s['city']} 的景点，用户兴趣: {s['interests']}。
+
+步骤:
+1. 调用 maps_text_search 工具搜索景点
+2. 将结果整理成 JSON 数组输出
+
+必须调用工具搜索，然后输出 JSON 格式数据。""",
         output_key="attractions_data"
     )
 
@@ -182,7 +215,13 @@ def create_weather_node(llm, tools):
         tools=tools,
         system_prompt=WEATHER_AGENT_PROMPT,
         node_name="天气专家",
-        prepare_input=lambda s: f"查询 {s['city']} 从 {s['start_date']} 到 {s['end_date']} 的天气。",
+        prepare_input=lambda s: f"""请查询 {s['city']} 从 {s['start_date']} 到 {s['end_date']} 的天气。
+
+步骤:
+1. 调用 maps_weather 工具查询天气
+2. 将结果整理成 JSON 数组输出
+
+必须调用工具查询，然后输出 JSON 格式数据。""",
         output_key="weather_data"
     )
 
@@ -194,7 +233,13 @@ def create_hotel_node(llm, tools):
         tools=tools,
         system_prompt=HOTEL_AGENT_PROMPT,
         node_name="酒店专家",
-        prepare_input=lambda s: f"在 {s['city']} 找酒店，类型: {s.get('accommodation_type', '中档')}。",
+        prepare_input=lambda s: f"""请搜索 {s['city']} 的酒店，类型: {s.get('accommodation_type', '中档')}。
+
+步骤:
+1. 调用 maps_text_search 工具搜索酒店
+2. 将结果整理成 JSON 数组输出
+
+必须调用工具搜索，然后输出 JSON 格式数据。""",
         output_key="hotels_data"
     )
 
