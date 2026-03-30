@@ -37,6 +37,9 @@ from backend.config.settings import settings
 # 设置环境变量
 os.environ["OPENAI_API_KEY"] = settings.deepseek_api_key or "sk-placeholder"
 
+# 确认关键词（从统一配置读取）
+CONFIRM_KEYWORDS = settings.confirm_keywords
+
 # 调试模式
 if settings.debug:
     os.environ["LANGCHAIN_DEBUG"] = "true"
@@ -192,8 +195,8 @@ class TripChatSession:
         current_state = await self.system.graph.aget_state(self.config)
         current_plan = current_state.values.get('final_plan')
 
-        # 用户确认满意
-        if user_input.strip() in ['确认', '满意', '好的', '可以', '没问题', 'confirm']:
+        # 用户确认满意（使用统一配置的确认关键词）
+        if user_input.strip() in CONFIRM_KEYWORDS:
             return current_plan
 
         if not current_plan:
@@ -317,7 +320,7 @@ async def interactive_main():
             if not user_input:
                 continue
 
-            if user_input in ['确认', '满意', '好的', '可以', '没问题', 'confirm', 'exit', 'quit', 'q']:
+            if user_input in CONFIRM_KEYWORDS or user_input in ['exit', 'quit', 'q']:
                 print("\n[OK] 行程规划完成！祝您旅途愉快！")
                 break
 

@@ -1,6 +1,6 @@
 """项目配置管理"""
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Optional, List
 from pathlib import Path
 
 # 获取项目根目录的 .env 文件路径
@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     # 服务器配置
     host: str = "0.0.0.0"
     port: int = 8000
+
+    # 会话配置
+    session_expire_seconds: int = 3600  # 会话过期时间（秒）
+
+    # CORS 配置（生产环境应通过环境变量设置）
+    allowed_origins: Optional[List[str]] = None
+
+    # 确认关键词（统一配置）
+    confirm_keywords: List[str] = ['确认', '满意', '好的', '可以', '没问题', 'confirm']
 
     class Config:
         env_file = str(ENV_FILE)
