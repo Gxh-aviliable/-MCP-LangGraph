@@ -5,12 +5,12 @@
 """
 import time
 import asyncio
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.agent import TripChatSession
-from backend.model import TripRequest, FeedbackRequest
+from backend.agent import ChatSession, TripChatSession
+from backend.model import TripRequest, FeedbackRequest, ChatRequest, ChatResponse
 from backend.config.settings import settings
 
 # ===================== 配置 =====================
@@ -37,6 +37,7 @@ class SessionManager:
     解决问题:
     - 内存泄漏：会话不再永久残留
     - 过期机制：长时间不活跃的会话会被清理
+    - 支持两种会话类型：ChatSession（对话式）和 TripChatSession（表单式）
     """
 
     def __init__(self, expire_seconds: int = 3600):
@@ -82,14 +83,14 @@ class SessionManager:
         if expired_keys:
             print(f"[SessionManager] 本次清理 {len(expired_keys)} 个过期会话")
 
-    def set(self, session_id: str, session: TripChatSession):
+    def set(self, session_id: str, session: Union[ChatSession, TripChatSession]):
         """存储会话"""
         self._sessions[session_id] = {
             'session': session,
             'last_active': time.time()
         }
 
-    def get(self, session_id: str) -> Optional[TripChatSession]:
+    def get(self, session_id: str) -> Optional[Union[ChatSession, TripChatSession]]:
         """获取会话（同时更新活跃时间）"""
         session_data = self._sessions.get(session_id)
         if session_data:
@@ -121,8 +122,8 @@ session_manager = SessionManager(expire_seconds=settings.session_expire_seconds)
 
 app = FastAPI(
     title="Travel Planning Agent API",
-    description="多轮对话旅行规划 Agent",
-    version="1.0.0"
+    description="对话式旅行规划 Agent",
+    version="2.0.0"
 )
 
 # CORS 配置（安全配置，不再使用 *）
@@ -148,12 +149,117 @@ async def startup_event():
 @app.get("/")
 async def root():
     """健康检查"""
-    return {"status": "ok", "message": "Travel Planning Agent API"}
+    return {"status": "ok", "message": "Travel Planning Agent API v2.0"}
 
+
+# ===================== 对话式 API =====================
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """对话式交互 API
+
+    - 首次调用可不传 session_id，系统会创建新会话并返回问候消息
+    - 后续调用需传入 session_id 以保持对话上下文
+    - 返回的 stage 表示当前对话阶段：
+      - greeting: 问候阶段
+      - collecting: 收集信息阶段
+      - confirming: 确认阶段
+      - planning: 规划中
+      - refining: 调整阶段
+      - done: 完成
+    """
+    try:
+        # 获取或创建会话
+        if request.session_id:
+            session = session_manager.get(request.session_id)
+            if not session:
+                return ChatResponse(
+                    success=False,
+                    session_id=request.session_id,
+                    reply="会话不存在或已过期，请刷新页面重新开始。",
+                    stage="done",
+                    collected_info=None,
+                    missing_fields=[],
+                    plan=None
+                )
+        else:
+            # 创建新的对话会话
+            session = ChatSession()
+            await session.initialize()
+            session_manager.set(session.thread_id, session)
+            print(f"[API] 新建会话: {session.thread_id}")
+
+        # 如果是首次对话，返回问候
+        if not request.session_id and not request.message:
+            result = await session.start()
+            return ChatResponse(
+                success=True,
+                session_id=session.thread_id,
+                reply=result['reply'],
+                stage=result['stage'],
+                collected_info=result['collected_info'],
+                missing_fields=result['missing_fields'],
+                plan=None
+            )
+
+        # 处理用户消息
+        result = await session.chat(request.message)
+
+        # 检查是否需要清理会话
+        if result['stage'] == 'done':
+            session_manager.delete(session.thread_id)
+            print(f"[API] 会话结束: {session.thread_id}")
+
+        return ChatResponse(
+            success=True,
+            session_id=session.thread_id,
+            reply=result['reply'],
+            stage=result['stage'],
+            collected_info=result.get('collected_info'),
+            missing_fields=result.get('missing_fields', []),
+            plan=result.get('plan')
+        )
+
+    except Exception as e:
+        print(f"[API ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return ChatResponse(
+            success=False,
+            session_id=request.session_id or "",
+            reply=f"抱歉，发生了错误：{str(e)}",
+            stage="collecting",
+            collected_info=None,
+            missing_fields=[],
+            plan=None
+        )
+
+
+@app.get("/api/chat/{session_id}/status")
+async def get_chat_status(session_id: str):
+    """获取会话状态"""
+    session = session_manager.get(session_id)
+
+    if not session:
+        return {"success": False, "error": "会话不存在或已过期"}
+
+    state = await session.get_current_state()
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "stage": state.get('conversation_stage', 'greeting'),
+        "collected_info": state.get('collected_info', {}),
+        "missing_fields": state.get('missing_fields', []),
+        "has_plan": state.get('final_plan') is not None
+    }
+
+
+# ===================== 兼容旧版 API =====================
 
 @app.post("/api/plan")
 async def create_plan(request: TripRequest):
-    """创建旅行规划
+    """创建旅行规划（兼容旧版表单模式）
 
     返回 session_id 用于后续多轮对话
     """
@@ -170,7 +276,7 @@ async def create_plan(request: TripRequest):
         if not plan:
             return {"success": False, "error": "规划失败"}
 
-        # 保存会话（使用新的会话管理器）
+        # 保存会话
         session_id = session.thread_id
         session_manager.set(session_id, session)
 
@@ -191,7 +297,7 @@ async def create_plan(request: TripRequest):
 
 @app.post("/api/feedback")
 async def submit_feedback(request: FeedbackRequest):
-    """提交反馈，继续多轮对话"""
+    """提交反馈，继续多轮对话（兼容旧版）"""
     print(f"\n[API] 收到反馈: session={request.session_id}, message={request.message}")
 
     session = session_manager.get(request.session_id)
@@ -202,7 +308,7 @@ async def submit_feedback(request: FeedbackRequest):
     try:
         plan = await session.feedback(request.message)
 
-        # 如果用户确认满意，清理会话（使用统一配置的确认关键词）
+        # 如果用户确认满意，清理会话
         if request.message.strip() in CONFIRM_KEYWORDS:
             session_manager.delete(request.session_id)
             print(f"[API] 会话结束: {request.session_id}, 剩余会话: {session_manager.count()}")

@@ -14,6 +14,12 @@ from .nodes import (
     format_weather,
     format_hotels,
     summarize_plan,
+    # 对话节点
+    greeting_node,
+    requirement_analyzer_node,
+    response_generator_node,
+    confirm_check_node,
+    stage_router_node,
 )
 
 __all__ = [
@@ -28,4 +34,10 @@ __all__ = [
     'format_weather',
     'format_hotels',
     'summarize_plan',
+    # 对话节点
+    'greeting_node',
+    'requirement_analyzer_node',
+    'response_generator_node',
+    'confirm_check_node',
+    'stage_router_node',
 ]

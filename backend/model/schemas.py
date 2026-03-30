@@ -114,3 +114,31 @@ class FeedbackRequest(BaseModel):
     """反馈请求 - 用于多轮对话"""
     session_id: str = Field(..., description="会话ID")
     message: str = Field(..., description="用户反馈消息")
+
+
+""""=======================对话模型========================"""
+class ChatRequest(BaseModel):
+    """对话请求 - 用于聊天式交互"""
+    session_id: Optional[str] = Field(default=None, description="会话ID，首次可为空")
+    message: str = Field(..., description="用户消息")
+
+
+class CollectedInfo(BaseModel):
+    """已收集的旅行信息"""
+    city: Optional[str] = Field(default=None, description="目的地城市")
+    start_date: Optional[str] = Field(default=None, description="开始日期")
+    end_date: Optional[str] = Field(default=None, description="结束日期")
+    interests: List[str] = Field(default_factory=list, description="兴趣偏好")
+    budget_per_day: Optional[int] = Field(default=None, description="每日预算")
+    accommodation_type: Optional[str] = Field(default=None, description="住宿类型")
+
+
+class ChatResponse(BaseModel):
+    """对话响应"""
+    success: bool = Field(default=True, description="是否成功")
+    session_id: str = Field(..., description="会话ID")
+    reply: str = Field(..., description="机器人回复")
+    stage: str = Field(..., description="对话阶段: greeting/collecting/confirming/planning/refining/done")
+    collected_info: Optional[CollectedInfo] = Field(default=None, description="已收集信息")
+    missing_fields: List[str] = Field(default_factory=list, description="缺失字段")
+    plan: Optional[dict] = Field(default=None, description="行程计划(生成后返回)")

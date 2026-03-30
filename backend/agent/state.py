@@ -31,6 +31,13 @@ class ChatAgentState(TypedDict):
     action: Optional[str]             # 操作类型
     details: Optional[str]            # 详细说明
 
+    # ==================== 需求收集状态（新增） ====================
+    conversation_stage: str           # 对话阶段: greeting/collecting/confirming/planning/refining/done
+    collected_info: Dict[str, Any]    # 已收集的旅行信息
+    missing_fields: List[str]         # 缺失的必要字段
+    ready_to_plan: bool               # 是否可以开始规划
+    user_confirmed: bool              # 用户是否确认生成
+
     # ==================== 流程控制 ====================
     iteration_count: int              # 迭代次数
     is_satisfied: bool                # 用户是否满意
@@ -39,42 +46,93 @@ class ChatAgentState(TypedDict):
     final_plan: Optional[Dict[str, Any]]                    # 最终行程
     context: Annotated[List[str], operator.add]             # 上下文信息
     execution_errors: Annotated[List[str], operator.add]    # 执行错误
+    bot_reply: Optional[str]           # 机器人回复（用于响应生成）
 
 
-def create_initial_state(request) -> Dict[str, Any]:
+# 必要字段列表
+REQUIRED_FIELDS = ['city', 'start_date', 'end_date']
+
+
+def create_initial_state(request=None) -> Dict[str, Any]:
     """创建初始状态
 
     Args:
-        request: TripRequest 对象
+        request: TripRequest 对象（可选，用于旧的表单模式）
 
     Returns:
         初始状态字典
     """
-    return {
-        # 用户输入
-        "city": request.city,
-        "start_date": request.start_date,
-        "end_date": request.end_date,
-        "interests": request.interests,
-        "accommodation_type": request.accommodation_type,
-        "budget_per_day": request.budget_per_day,
-        "transportation_mode": request.transportation_mode,
-        # 中间结果
-        "attractions_data": [],
-        "weather_data": [],
-        "hotels_data": [],
-        # 对话相关
-        "messages": [],
-        "user_feedback": None,
-        "intent": None,
-        "target_days": None,
-        "action": None,
-        "details": None,
-        # 流程控制
-        "iteration_count": 0,
-        "is_satisfied": False,
-        # 最终结果
-        "final_plan": None,
-        "context": [],
-        "execution_errors": [],
-    }
+    if request:
+        # 表单模式：已有完整信息
+        return {
+            # 用户输入
+            "city": request.city,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+            "interests": request.interests,
+            "accommodation_type": request.accommodation_type,
+            "budget_per_day": request.budget_per_day,
+            "transportation_mode": request.transportation_mode,
+            # 中间结果
+            "attractions_data": [],
+            "weather_data": [],
+            "hotels_data": [],
+            # 对话相关
+            "messages": [],
+            "user_feedback": None,
+            "intent": None,
+            "target_days": None,
+            "action": None,
+            "details": None,
+            # 需求收集
+            "conversation_stage": "planning",
+            "collected_info": {},
+            "missing_fields": [],
+            "ready_to_plan": True,
+            "user_confirmed": True,
+            # 流程控制
+            "iteration_count": 0,
+            "is_satisfied": False,
+            # 最终结果
+            "final_plan": None,
+            "context": [],
+            "execution_errors": [],
+            "bot_reply": None,
+        }
+    else:
+        # 对话模式：从问候开始
+        return {
+            # 用户输入（初始为空）
+            "city": "",
+            "start_date": "",
+            "end_date": "",
+            "interests": [],
+            "accommodation_type": None,
+            "budget_per_day": None,
+            "transportation_mode": None,
+            # 中间结果
+            "attractions_data": [],
+            "weather_data": [],
+            "hotels_data": [],
+            # 对话相关
+            "messages": [],
+            "user_feedback": None,
+            "intent": None,
+            "target_days": None,
+            "action": None,
+            "details": None,
+            # 需求收集
+            "conversation_stage": "greeting",
+            "collected_info": {},
+            "missing_fields": REQUIRED_FIELDS.copy(),
+            "ready_to_plan": False,
+            "user_confirmed": False,
+            # 流程控制
+            "iteration_count": 0,
+            "is_satisfied": False,
+            # 最终结果
+            "final_plan": None,
+            "context": [],
+            "execution_errors": [],
+            "bot_reply": None,
+        }

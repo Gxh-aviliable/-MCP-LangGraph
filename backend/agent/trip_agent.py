@@ -1,13 +1,14 @@
 """多轮对话旅行规划 Agent
 
-支持持续性对话，用户可以动态调整行程
+支持对话式交互，用户可以通过自然对话描述需求
 
 使用方式:
-    from backend.agent import TripChatSession
+    from backend.agent import ChatSession
 
-    session = TripChatSession()
-    plan = await session.start(request)
-    new_plan = await session.feedback("第一天景点有点多")
+    session = ChatSession()
+    reply = await session.chat("我想去北京玩几天")  # 机器人追问日期
+    reply = await session.chat("下周出发，玩3天")    # 继续收集信息
+    reply = await session.chat("是的，生成吧")       # 生成行程
 """
 import asyncio
 import os
@@ -22,7 +23,7 @@ from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 # 项目内部导入
-from backend.agent.state import ChatAgentState, create_initial_state
+from backend.agent.state import ChatAgentState, create_initial_state, REQUIRED_FIELDS
 from backend.agent.nodes import (
     create_attraction_node,
     create_weather_node,
@@ -30,6 +31,11 @@ from backend.agent.nodes import (
     plan_trip_node,
     parse_intent_node,
     adjust_plan_node,
+    greeting_node,
+    requirement_analyzer_node,
+    response_generator_node,
+    confirm_check_node,
+    stage_router_node,
 )
 from backend.model import TripPlan, TripRequest
 from backend.config.settings import settings
@@ -45,15 +51,16 @@ if settings.debug:
     os.environ["LANGCHAIN_DEBUG"] = "true"
 
 
-# ===================== 核心系统 =====================
+# ===================== 对话式 Agent 系统 =====================
 
-class TripChatSystem:
-    """旅行规划系统核心
+class ChatAgentSystem:
+    """对话式旅行规划系统
 
-    负责:
-    - 初始化 MCP 工具
-    - 创建 LLM 实例
-    - 构建 LangGraph 执行图
+    支持:
+    - 对话收集需求
+    - 自动分析信息完整性
+    - 生成行程
+    - 多轮调整
     """
 
     def __init__(self):
@@ -65,11 +72,12 @@ class TripChatSystem:
         self.amap_key = settings.amap_maps_api_key
         self.client = None
         self.tools = None
-        self.graph = None
+        self.chat_graph = None
+        self.plan_graph = None
         self.checkpointer = MemorySaver()
 
     async def initialize(self):
-        """初始化 MCP 工具"""
+        """初始化 MCP 工具和 Agent"""
         if not self.amap_key:
             raise ValueError("AMAP_MAPS_API_KEY 未设置")
 
@@ -95,17 +103,45 @@ class TripChatSystem:
             tool_names = [t.name for t in self.tools]
             print(f"[OK] 成功加载工具: {tool_names}")
 
-            self.graph = self._create_graph()
+            # 创建对话流程图
+            self.chat_graph = self._create_chat_graph()
+            # 创建规划流程图
+            self.plan_graph = self._create_plan_graph()
 
         except Exception as e:
             print(f"[FAIL] MCP 初始化失败: {str(e)}")
             raise
 
-    def _create_graph(self) -> StateGraph:
-        """构建 LangGraph 执行图"""
+    def _create_chat_graph(self) -> StateGraph:
+        """构建对话流程图"""
         workflow = StateGraph(ChatAgentState)
 
-        # 添加专家节点
+        # 对话节点
+        async def analyzer_node(state):
+            return await requirement_analyzer_node(self.llm, state)
+
+        async def response_node(state):
+            return await response_generator_node(self.llm, state)
+
+        workflow.add_node("greeting", greeting_node)
+        workflow.add_node("analyzer", analyzer_node)
+        workflow.add_node("response", response_node)
+
+        # 设置入口点
+        workflow.set_entry_point("greeting")
+
+        # 添加边
+        workflow.add_edge("greeting", END)  # 问候后等待用户输入
+        workflow.add_edge("analyzer", "response")
+        workflow.add_edge("response", END)  # 回复后等待用户输入
+
+        return workflow.compile(checkpointer=self.checkpointer)
+
+    def _create_plan_graph(self) -> StateGraph:
+        """构建规划流程图（生成行程）"""
+        workflow = StateGraph(ChatAgentState)
+
+        # 专家节点
         workflow.add_node(
             "attraction_expert",
             create_attraction_node(self.llm, self.tools)
@@ -119,12 +155,13 @@ class TripChatSystem:
             create_hotel_node(self.llm, self.tools)
         )
 
-        # 添加规划节点 (包装为 async 函数)
+        # 规划节点
         async def plan_node(state):
             return await plan_trip_node(self.llm, state)
+
         workflow.add_node("plan_trip", plan_node)
 
-        # 构建执行流程
+        # 执行流程
         workflow.set_entry_point("attraction_expert")
         workflow.add_edge("attraction_expert", "weather_expert")
         workflow.add_edge("weather_expert", "hotel_expert")
@@ -133,33 +170,39 @@ class TripChatSystem:
 
         return workflow.compile(checkpointer=self.checkpointer)
 
-    # ===================== 多轮对话方法 =====================
+    async def generate_plan(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """根据收集的信息生成行程"""
+        print(f"\n[Planning] 开始生成行程: {state.get('city')}, {state.get('start_date')} - {state.get('end_date')}")
+        result = await self.plan_graph.ainvoke(state)
+        return result
+
+    async def adjust_plan(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """调整现有行程"""
+        return await adjust_plan_node(self.llm, state)
 
     async def parse_intent(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """解析用户意图"""
         return await parse_intent_node(self.llm, state)
 
-    async def adjust_plan(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """调整行程"""
-        return await adjust_plan_node(self.llm, state)
 
+# ===================== 对话会话管理 =====================
 
-# ===================== 会话管理 =====================
-
-class TripChatSession:
-    """多轮对话会话管理
+class ChatSession:
+    """对话式会话管理
 
     使用方式:
-        session = TripChatSession()
-        plan = await session.start(request)
-        new_plan = await session.feedback("第一天景点有点多")
+        session = ChatSession()
+        reply = await session.chat("我想去北京")
+        reply = await session.chat("下周出发")
+        ...
     """
 
     def __init__(self):
-        self.system = TripChatSystem()
+        self.system = ChatAgentSystem()
         self.thread_id = str(uuid.uuid4())
         self.config = {"configurable": {"thread_id": self.thread_id}}
         self._initialized = False
+        self._has_sent_greeting = False
 
     async def initialize(self):
         """初始化会话"""
@@ -167,59 +210,162 @@ class TripChatSession:
             await self.system.initialize()
             self._initialized = True
 
-    async def start(self, request: TripRequest) -> Optional[Dict[str, Any]]:
-        """开始规划行程
+    async def start(self) -> Dict[str, Any]:
+        """开始会话，返回问候消息"""
+        await self.initialize()
+
+        if not self._has_sent_greeting:
+            # 创建初始状态并获取问候
+            initial_state = create_initial_state()
+            result = await self.system.chat_graph.ainvoke(initial_state, self.config)
+            self._has_sent_greeting = True
+
+            return {
+                "reply": result.get('bot_reply', "您好！请告诉我您的旅行需求。"),
+                "stage": "greeting",
+                "collected_info": {},
+                "missing_fields": REQUIRED_FIELDS.copy(),
+                "plan": None
+            }
+
+        # 如果已发送问候，返回当前状态
+        current_state = await self.system.chat_graph.aget_state(self.config)
+        return self._build_response(current_state.values)
+
+    async def chat(self, user_message: str) -> Dict[str, Any]:
+        """处理用户消息，返回回复
 
         Args:
-            request: TripRequest 对象
+            user_message: 用户输入的消息
 
         Returns:
-            规划结果字典，失败返回 None
+            包含 reply, stage, collected_info, missing_fields, plan 的字典
         """
         await self.initialize()
 
-        inputs = create_initial_state(request)
-        result = await self.system.graph.ainvoke(inputs, self.config)
+        # 获取当前状态
+        current_state = await self.system.chat_graph.aget_state(self.config)
+        current_values = current_state.values
 
-        return result.get('final_plan')
+        stage = current_values.get('conversation_stage', 'greeting')
+        collected_info = current_values.get('collected_info', {})
+        missing_fields = current_values.get('missing_fields', REQUIRED_FIELDS.copy())
+        ready_to_plan = current_values.get('ready_to_plan', False)
+        current_plan = current_values.get('final_plan')
 
-    async def feedback(self, user_input: str) -> Optional[Dict[str, Any]]:
-        """提交用户反馈，继续对话
+        print(f"\n[Chat] 收到消息: {user_message}, 当前阶段: {stage}")
 
-        Args:
-            user_input: 用户反馈文本
+        # 如果已有行程，处理调整请求
+        if current_plan:
+            return await self._handle_plan_adjustment(user_message, current_values)
 
-        Returns:
-            调整后的行程，失败返回 None
-        """
-        current_state = await self.system.graph.aget_state(self.config)
-        current_plan = current_state.values.get('final_plan')
+        # 检查是否是确认生成
+        if stage == "confirming" and ready_to_plan:
+            confirm_result = await confirm_check_node({"user_feedback": user_message})
+            if confirm_result == "confirmed":
+                # 用户确认，开始生成行程
+                return await self._generate_and_return(collected_info, current_values)
 
-        # 用户确认满意（使用统一配置的确认关键词）
-        if user_input.strip() in CONFIRM_KEYWORDS:
-            return current_plan
-
-        if not current_plan:
-            print("[WARN] 暂无行程，无法调整")
-            return None
-
-        # 解析意图
-        print("[INFO] 解析您的反馈...")
-        intent_state = {
-            "user_feedback": user_input,
-            "final_plan": current_plan
+        # 分析用户消息
+        analyze_input = {
+            **current_values,
+            "user_feedback": user_message,
+            "collected_info": collected_info,
+            "missing_fields": missing_fields,
         }
 
+        result = await self.system.chat_graph.ainvoke(analyze_input, self.config)
+        new_state = await self.system.chat_graph.aget_state(self.config)
+
+        return self._build_response(new_state.values)
+
+    async def _generate_and_return(self, collected_info: Dict[str, Any], current_values: Dict[str, Any]) -> Dict[str, Any]:
+        """生成行程并返回结果"""
+        print("\n[Generating] 用户确认，开始生成行程...")
+
+        # 构建规划输入
+        plan_input = {
+            "city": collected_info.get('city', ''),
+            "start_date": collected_info.get('start_date', ''),
+            "end_date": collected_info.get('end_date', ''),
+            "interests": collected_info.get('interests', []),
+            "budget_per_day": collected_info.get('budget_per_day'),
+            "accommodation_type": collected_info.get('accommodation_type'),
+            "transportation_mode": None,
+            # 保持其他状态
+            "conversation_stage": "planning",
+            "collected_info": collected_info,
+            "missing_fields": [],
+            "ready_to_plan": True,
+            "user_confirmed": True,
+        }
+
+        # 执行规划
+        plan_result = await self.system.generate_plan(plan_input)
+        final_plan = plan_result.get('final_plan')
+
+        # 更新对话状态
+        await self.system.chat_graph.aupdate_state(
+            self.config,
+            {
+                "final_plan": final_plan,
+                "conversation_stage": "refining",
+                "bot_reply": "行程已生成！您可以查看并提出调整建议，或者输入'确认'完成规划。"
+            }
+        )
+
+        return {
+            "reply": "行程已生成！您可以查看并提出调整建议，或者输入'确认'完成规划。",
+            "stage": "refining",
+            "collected_info": collected_info,
+            "missing_fields": [],
+            "plan": final_plan
+        }
+
+    async def _handle_plan_adjustment(self, user_message: str, current_values: Dict[str, Any]) -> Dict[str, Any]:
+        """处理行程调整请求"""
+        current_plan = current_values.get('final_plan')
+
+        # 检查是否确认满意
+        if user_message.strip() in CONFIRM_KEYWORDS:
+            await self.system.chat_graph.aupdate_state(
+                self.config,
+                {"conversation_stage": "done", "is_satisfied": True}
+            )
+            return {
+                "reply": "感谢您的确认！祝您旅途愉快！如需新的规划，请告诉我。",
+                "stage": "done",
+                "collected_info": current_values.get('collected_info', {}),
+                "missing_fields": [],
+                "plan": current_plan
+            }
+
+        # 解析意图
+        intent_state = {
+            "user_feedback": user_message,
+            "final_plan": current_plan
+        }
         intent_result = await self.system.parse_intent(intent_state)
         intent = intent_result.get('intent')
 
         if intent == 'confirm':
-            print("[OK] 您对行程满意！")
-            return current_plan
+            return {
+                "reply": "感谢您的确认！祝您旅途愉快！",
+                "stage": "done",
+                "collected_info": current_values.get('collected_info', {}),
+                "missing_fields": [],
+                "plan": current_plan
+            }
 
         if intent not in ['modify_attractions', 'modify_hotels', 'modify_schedule']:
-            print("[WARN] 暂时无法理解您的需求，请换种方式表达")
-            return current_plan
+            # 无法理解，生成友好回复
+            return {
+                "reply": "抱歉，我不太理解您的需求。您可以尝试这样说：'第一天景点太多，减少一些' 或 '换个离景点近的酒店'",
+                "stage": "refining",
+                "collected_info": current_values.get('collected_info', {}),
+                "missing_fields": [],
+                "plan": current_plan
+            }
 
         # 执行调整
         adjust_state = {
@@ -228,27 +374,109 @@ class TripChatSession:
             "target_days": intent_result.get('target_days', []),
             "action": intent_result.get('action'),
             "details": intent_result.get('details'),
-            "iteration_count": current_state.values.get('iteration_count', 0) + 1
+            "iteration_count": current_values.get('iteration_count', 0) + 1
         }
 
         adjust_result = await self.system.adjust_plan(adjust_state)
         new_plan = adjust_result.get('final_plan')
 
         if new_plan:
-            await self.system.graph.aupdate_state(
+            await self.system.chat_graph.aupdate_state(
                 self.config,
                 {
                     "final_plan": new_plan,
                     "iteration_count": adjust_state['iteration_count'],
-                    "user_feedback": user_input
+                    "bot_reply": f"已根据您的反馈调整行程：{intent_result.get('details')}"
                 }
             )
 
-        return new_plan
+            return {
+                "reply": f"已根据您的反馈调整行程：{intent_result.get('details')}。您可以继续提出调整建议，或输入'确认'完成。",
+                "stage": "refining",
+                "collected_info": current_values.get('collected_info', {}),
+                "missing_fields": [],
+                "plan": new_plan
+            }
+
+        return {
+            "reply": "抱歉，调整失败了。请尝试换一种方式描述您的需求。",
+            "stage": "refining",
+            "collected_info": current_values.get('collected_info', {}),
+            "missing_fields": [],
+            "plan": current_plan
+        }
+
+    def _build_response(self, state_values: Dict[str, Any]) -> Dict[str, Any]:
+        """构建响应字典"""
+        return {
+            "reply": state_values.get('bot_reply', "请告诉我您的旅行需求。"),
+            "stage": state_values.get('conversation_stage', 'collecting'),
+            "collected_info": state_values.get('collected_info', {}),
+            "missing_fields": state_values.get('missing_fields', []),
+            "plan": state_values.get('final_plan')
+        }
+
+    async def get_current_state(self) -> Dict[str, Any]:
+        """获取当前会话状态"""
+        state = await self.system.chat_graph.aget_state(self.config)
+        return state.values
+
+
+# ===================== 兼容旧版本的会话类 =====================
+
+class TripChatSession(ChatSession):
+    """兼容旧版本的会话类
+
+    保持原有的 start/feedback 方法兼容性
+    """
+
+    async def start(self, request: TripRequest = None) -> Optional[Dict[str, Any]]:
+        """开始规划行程
+
+        Args:
+            request: TripRequest 对象（可选，如果不提供则进入对话模式）
+
+        Returns:
+            规划结果字典，或问候消息字典
+        """
+        await self.initialize()
+
+        if request:
+            # 表单模式：直接生成行程
+            inputs = create_initial_state(request)
+            result = await self.system.generate_plan(inputs)
+
+            # 更新状态
+            await self.system.chat_graph.aupdate_state(
+                self.config,
+                {
+                    "final_plan": result.get('final_plan'),
+                    "conversation_stage": "refining",
+                    "collected_info": {
+                        "city": request.city,
+                        "start_date": request.start_date,
+                        "end_date": request.end_date,
+                        "interests": request.interests,
+                    },
+                    "ready_to_plan": True,
+                }
+            )
+
+            return result.get('final_plan')
+
+        else:
+            # 对话模式：返回问候
+            result = await super().start()
+            return result.get('reply')
+
+    async def feedback(self, user_input: str) -> Optional[Dict[str, Any]]:
+        """提交用户反馈（兼容旧版本）"""
+        result = await self.chat(user_input)
+        return result.get('plan')
 
     async def get_current_plan(self) -> Optional[Dict[str, Any]]:
         """获取当前行程"""
-        state = await self.system.graph.aget_state(self.config)
+        state = await self.system.chat_graph.aget_state(self.config)
         return state.values.get('final_plan')
 
     def format_plan(self, plan: Optional[Dict[str, Any]]) -> str:
@@ -262,78 +490,43 @@ class TripChatSession:
 # ===================== 交互式主程序 =====================
 
 async def interactive_main():
-    """交互式多轮对话主程序"""
+    """交互式对话主程序"""
     print("=" * 60)
-    print("Travel Planning Agent - Multi-turn Dialog")
+    print("Travel Planning Agent - 对话模式")
     print("=" * 60)
 
-    session = TripChatSession()
+    session = ChatSession()
 
     try:
-        # 获取用户输入
-        print("\n请输入您的旅行需求：")
-        city = input("城市: ").strip() or "北京"
-        start_date = input("开始日期 (YYYY-MM-DD): ").strip() or "2026-03-26"
-        end_date = input("结束日期 (YYYY-MM-DD): ").strip() or "2026-03-27"
-        interests_str = input("兴趣偏好 (逗号分隔): ").strip() or "历史古迹"
-        accommodation = input("住宿类型 (可选): ").strip() or None
-        budget = input("每日预算 (可选): ").strip()
-        transportation = input("交通方式 (可选): ").strip() or None
-
-        # 构建请求
-        request = TripRequest(
-            city=city,
-            start_date=start_date,
-            end_date=end_date,
-            interests=[i.strip() for i in interests_str.split(',')],
-            accommodation_type=accommodation,
-            budget_per_day=int(budget) if budget else None,
-            transportation_mode=transportation
-        )
-
-        print(f"\n[INFO] 正在为您规划 {city} 的行程...\n")
-
-        # 开始规划
-        plan = await session.start(request)
-
-        if not plan:
-            print("[FAIL] 规划失败，请重试")
-            return
-
-        # 显示行程
-        print("=" * 60)
-        print("Your Trip Plan:")
-        print("=" * 60)
-        print(session.format_plan(plan))
-
-        # 多轮对话循环
-        print("\n" + "=" * 60)
-        print("您可以提出修改意见，例如：")
-        print("   - 第一天景点有点多")
-        print("   - 酒店换个离景点近的")
-        print("   输入 '确认' 或 '满意' 完成规划")
-        print("=" * 60)
+        # 获取问候消息
+        greeting = await session.start()
+        print(f"\n[助手]: {greeting['reply']}")
 
         while True:
-            user_input = input("\n您的反馈: ").strip()
+            user_input = input("\n[您]: ").strip()
 
             if not user_input:
                 continue
 
-            if user_input in CONFIRM_KEYWORDS or user_input in ['exit', 'quit', 'q']:
-                print("\n[OK] 行程规划完成！祝您旅途愉快！")
+            if user_input.lower() in ['exit', 'quit', 'q']:
+                print("\n[助手]: 再见！祝您旅途愉快！")
                 break
 
-            print("\n[INFO] 正在调整行程...")
-            plan = await session.feedback(user_input)
+            # 处理消息
+            result = await session.chat(user_input)
 
-            if plan:
-                print("\n" + "=" * 60)
-                print("调整后的行程：")
-                print("=" * 60)
-                print(session.format_plan(plan))
-            else:
-                print("[WARN] 调整失败，请重试")
+            print(f"\n[助手]: {result['reply']}")
+
+            # 如果有行程，显示摘要
+            if result.get('plan'):
+                plan = result['plan']
+                print("\n" + "=" * 40)
+                print("行程摘要:")
+                for day in plan.get('days', []):
+                    day_idx = day.get('day_index', 0) + 1
+                    attractions = [a.get('name') for a in day.get('attractions', [])]
+                    print(f"  第{day_idx}天: {', '.join(attractions) if attractions else '暂无景点'}")
+                print("=" * 40)
 
     except KeyboardInterrupt:
         print("\n\n[INFO] 已取消")

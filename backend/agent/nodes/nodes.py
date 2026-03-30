@@ -18,6 +18,9 @@ from backend.prompts import (
     PLANNER_AGENT_PROMPT,
     INTENT_PARSER_PROMPT,
     ADJUSTMENT_PROMPT,
+    REQUIREMENT_ANALYZER_PROMPT,
+    RESPONSE_GENERATOR_PROMPT,
+    GREETING_MESSAGE,
 )
 from backend.model import TripPlan
 from backend.config.settings import settings
@@ -417,3 +420,200 @@ async def adjust_plan_node(llm, state: ChatAgentState) -> Dict[str, Any]:
         import traceback
         traceback.print_exc()
         return {"execution_errors": [f"调整失败: {str(e)}"]}
+
+
+# ===================== 对话式需求收集节点 =====================
+
+async def greeting_node(state: ChatAgentState) -> Dict[str, Any]:
+    """问候节点 - 初始化对话"""
+    print("\n[Greeting] 发送问候消息...")
+    return {
+        "bot_reply": GREETING_MESSAGE,
+        "conversation_stage": "greeting",
+        "messages": [{"role": "assistant", "content": GREETING_MESSAGE}]
+    }
+
+
+async def requirement_analyzer_node(llm, state: ChatAgentState) -> Dict[str, Any]:
+    """需求分析节点 - 解析用户消息，提取旅行信息"""
+    try:
+        user_message = state.get('user_feedback', '')
+        collected_info = state.get('collected_info', {})
+        current_date = datetime.now().strftime('%Y-%m-%d')
+
+        if not user_message:
+            return {"conversation_stage": "collecting"}
+
+        print(f"\n[Analyzer] 分析用户消息: {user_message}")
+
+        # 格式化已收集信息
+        collected_str = json.dumps(collected_info, ensure_ascii=False) if collected_info else "暂无"
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", REQUIREMENT_ANALYZER_PROMPT),
+            ("user", "分析用户消息并提取旅行信息")
+        ])
+
+        chain = prompt | llm
+
+        response = await chain.ainvoke({
+            "current_date": current_date,
+            "collected_info": collected_str,
+            "user_message": user_message
+        })
+
+        content = response.content
+        json_match = re.search(r'\{[\s\S]*\}', content)
+
+        if json_match:
+            result = json.loads(json_match.group())
+            extracted = result.get('extracted', {})
+            missing = result.get('missing', [])
+            ready = result.get('ready', False)
+            suggestions = result.get('suggestions', [])
+
+            # 合并已收集信息和新提取的信息
+            new_collected = {**collected_info}
+            for key, value in extracted.items():
+                if value is not None and value != [] and value != "":
+                    new_collected[key] = value
+
+            print(f"[OK] 提取信息: {extracted}, 缺失: {missing}, 就绪: {ready}")
+
+            # 更新状态字段
+            city = new_collected.get('city', '')
+            start_date = new_collected.get('start_date', '')
+            end_date = new_collected.get('end_date', '')
+
+            return {
+                "collected_info": new_collected,
+                "missing_fields": missing,
+                "ready_to_plan": ready,
+                "city": city,
+                "start_date": start_date,
+                "end_date": end_date,
+                "interests": new_collected.get('interests', []),
+                "budget_per_day": new_collected.get('budget_per_day'),
+                "accommodation_type": new_collected.get('accommodation_type'),
+                "messages": [{"role": "user", "content": user_message}],
+                "conversation_stage": "confirming" if ready else "collecting",
+            }
+
+        return {"conversation_stage": "collecting"}
+
+    except Exception as e:
+        print(f"[FAIL] 需求分析错误: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"conversation_stage": "collecting", "execution_errors": [f"分析失败: {str(e)}"]}
+
+
+async def response_generator_node(llm, state: ChatAgentState) -> Dict[str, Any]:
+    """响应生成节点 - 根据对话阶段生成回复"""
+    try:
+        stage = state.get('conversation_stage', 'greeting')
+        collected_info = state.get('collected_info', {})
+        missing_fields = state.get('missing_fields', [])
+        user_message = state.get('user_feedback', '')
+        current_plan = state.get('final_plan')
+
+        print(f"\n[Response] 生成回复, 阶段: {stage}")
+
+        # 格式化参数
+        collected_str = json.dumps(collected_info, ensure_ascii=False, indent=2) if collected_info else "暂无"
+        missing_str = ", ".join(missing_fields) if missing_fields else "无"
+        plan_summary = summarize_plan(current_plan) if current_plan else "暂无行程"
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", RESPONSE_GENERATOR_PROMPT),
+            ("user", "根据对话阶段生成回复")
+        ])
+
+        chain = prompt | llm
+
+        response = await chain.ainvoke({
+            "stage": stage,
+            "collected_info": collected_str,
+            "missing_fields": missing_str,
+            "user_message": user_message,
+            "plan_summary": plan_summary
+        })
+
+        content = response.content
+        json_match = re.search(r'\{[\s\S]*\}', content)
+
+        if json_match:
+            result = json.loads(json_match.group())
+            reply = result.get('reply', '请告诉我您的旅行需求。')
+            print(f"[OK] 生成回复: {reply[:50]}...")
+            return {
+                "bot_reply": reply,
+                "messages": [{"role": "assistant", "content": reply}]
+            }
+
+        # 如果无法解析，返回默认回复
+        default_reply = "请告诉我您想去哪里旅行？"
+        return {
+            "bot_reply": default_reply,
+            "messages": [{"role": "assistant", "content": default_reply}]
+        }
+
+    except Exception as e:
+        print(f"[FAIL] 响应生成错误: {str(e)}")
+        return {
+            "bot_reply": "抱歉，我遇到了一些问题。请重新描述您的需求。",
+            "messages": [{"role": "assistant", "content": "抱歉，我遇到了一些问题。请重新描述您的需求。"}]
+        }
+
+
+async def confirm_check_node(state: ChatAgentState) -> str:
+    """确认检查节点 - 判断用户是否确认生成计划"""
+    user_message = state.get('user_feedback', '').strip().lower()
+    confirm_keywords = ['是', '好', '生成', '可以', '确认', '没问题', 'ok', 'yes', '开始']
+
+    # 检查是否包含确认关键词
+    for keyword in confirm_keywords:
+        if keyword in user_message:
+            return "confirmed"
+
+    # 检查是否是拒绝
+    reject_keywords = ['不', '否', '取消', '等等', '再想想']
+    for keyword in reject_keywords:
+        if keyword in user_message:
+            return "rejected"
+
+    return "pending"
+
+
+async def stage_router_node(state: ChatAgentState) -> str:
+    """阶段路由节点 - 根据状态决定下一步"""
+    stage = state.get('conversation_stage', 'greeting')
+    ready_to_plan = state.get('ready_to_plan', False)
+    user_confirmed = state.get('user_confirmed', False)
+    has_plan = state.get('final_plan') is not None
+
+    # 如果已有行程，检查是否需要调整
+    if has_plan:
+        user_feedback = state.get('user_feedback', '')
+        if user_feedback and user_feedback.strip() not in ['确认', '满意', '好的']:
+            return "refining"
+        return "done"
+
+    # 根据阶段路由
+    if stage == "greeting":
+        return "collecting"
+
+    if stage == "collecting":
+        if ready_to_plan:
+            return "confirming"
+        return "collecting"
+
+    if stage == "confirming":
+        if user_confirmed:
+            return "planning"
+        return "confirming"
+
+    if stage == "planning":
+        return "planning"
+
+    return "collecting"
