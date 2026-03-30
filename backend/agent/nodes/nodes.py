@@ -137,16 +137,23 @@ def create_expert_node(
     # 过滤出该专家需要的特定工具
     tool_name_map = {t.name: t for t in tools}
 
-    # 根据节点类型选择合适的工具
+    # 根据节点类型选择合适的工具（不再使用危险的 fallback）
+    required_tool_name = None
     if "景点" in node_name or "attraction" in output_key:
-        # 景点专家只需要 maps_text_search
-        filtered_tools = [tool_name_map.get("maps_text_search", tools[0])]
+        required_tool_name = "maps_text_search"
     elif "天气" in node_name or "weather" in output_key:
-        # 天气专家只需要 maps_weather
-        filtered_tools = [tool_name_map.get("maps_weather", tools[0])]
+        required_tool_name = "maps_weather"
     elif "酒店" in node_name or "hotel" in output_key:
-        # 酒店专家只需要 maps_text_search
-        filtered_tools = [tool_name_map.get("maps_text_search", tools[0])]
+        required_tool_name = "maps_text_search"
+
+    if required_tool_name:
+        tool = tool_name_map.get(required_tool_name)
+        if not tool:
+            raise ValueError(
+                f"{node_name} 需要的工具 '{required_tool_name}' 未加载。"
+                f"可用工具: {list(tool_name_map.keys())}"
+            )
+        filtered_tools = [tool]
     else:
         filtered_tools = tools
 
@@ -375,7 +382,17 @@ async def adjust_plan_node(llm, state: ChatAgentState) -> Dict[str, Any]:
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", ADJUSTMENT_PROMPT),
-            ("user", "请调整行程")
+            ("user", """请根据以下信息调整行程：
+
+当前行程JSON:
+{current_plan}
+
+用户意图: {intent}
+目标天数: {target_days}
+操作类型: {action}
+详细说明: {details}
+
+请输出调整后的完整行程JSON。""")
         ])
 
         chain = prompt | llm.with_structured_output(TripPlan, method="json_mode")
