@@ -37,6 +37,9 @@ dist/
 temp/
 cache/
 
+# RAG Vector Database
+backend/data/travel_vectordb/
+
 # Tests
 .coverage
 htmlcov/

@@ -1,0 +1,32 @@
+{
+    "mcp_servers": [
+        {
+            "name": "Gaode Server",
+            "description": "高德地图服务 - POI搜索、天气查询、路线规划、酒店搜索",
+            "url": "${MCP_GAODE_URL}",
+            "enabled": true
+        },
+        {
+            "name": "12306 Server",
+            "description": "12306火车票服务 - 车次查询、票价查询、站点查询",
+            "url": "${MCP_12306_URL}",
+            "enabled": true
+        },
+        {
+            "name": "bazi Server",
+            "description": "八字黄历服务 - 农历查询、黄历宜忌、吉日查询",
+            "url": "${MCP_BAZI_URL}",
+            "enabled": true
+        },
+        {
+            "name": "flight Server",
+            "description": "航班查询服务 - 航班信息查询（距离>800km时使用）",
+            "url": "${MCP_FLIGHT_URL}",
+            "enabled": false
+        }
+    ],
+    "agent": {
+        "name": "TravelPlannerAssistant",
+        "instructions": "你是一名专业的旅行规划智能助手。你可以帮助用户通过以下工具进行旅游规划：1) 12306查询 - 查询火车票信息；2) 高德地图 - 路线规划、酒店搜索、天气预报；3) 黄历查询 - 查询出行吉日。请根据用户需求调用相应工具，并生成详细的旅行方案。"
+    }
+}

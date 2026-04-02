@@ -11,9 +11,24 @@ ENV_FILE = PROJECT_ROOT / ".env"
 class Settings(BaseSettings):
     """应用配置"""
 
-    # API Keys
-    deepseek_api_key: Optional[str] = None
-    amap_maps_api_key: Optional[str] = None
+    # === 模型 API Keys ===
+    deepseek_api_key: Optional[str] = None      # DeepSeek API (R1推理模型)
+    dashscope_api_key: Optional[str] = None     # 阿里云DashScope (Qwen3 + Embedding)
+    amap_maps_api_key: Optional[str] = None     # 高德地图 API
+
+    # === 模型选择 ===
+    primary_model: str = "qwen-plus"            # 主模型(日常决策)
+    reasoning_model: str = "deepseek-reasoner"  # 推理模型(复杂场景)
+    llm_temperature: float = 0.7                # 模型温度
+
+    # === RAG 配置 ===
+    chroma_persist_dir: str = "./data/travel_vectordb"
+    rag_chunk_size: int = 500
+    rag_chunk_overlap: int = 100
+    rag_top_k: int = 5
+
+    # === MCP 配置 ===
+    mcp_config_path: str = "backend/config/mcp_config.json"
 
     # 应用配置
     app_name: str = "Travel Planning Agent"

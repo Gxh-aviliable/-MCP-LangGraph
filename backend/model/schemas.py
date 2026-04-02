@@ -69,7 +69,7 @@ class WeatherInfo(BaseModel):
     night_temp: int = Field(...,description="夜间温度(摄氏度)")
     wind_direction: str = Field(...,description="风向")
     wind_power: str = Field(...,description="风力")
-    
+
     @field_validator('day_temp','night_temp',mode='before')
     def parse_temperature(cls,v):
         """解析温度字符串："16°C" -> 16"""
@@ -81,6 +81,26 @@ class WeatherInfo(BaseModel):
                 return 0  # 容错处理
         return v
 
+
+class TransportOption(BaseModel):
+    """交通方案"""
+    type: str = Field(..., description="交通类型: train/driving/flight")
+    name: str = Field(..., description="方案名称")
+    duration: str = Field(default="", description="耗时")
+    cost: int = Field(default=0, description="费用(元)")
+    details: dict = Field(default_factory=dict, description="详细信息")
+
+
+class LuckyDayInfo(BaseModel):
+    """黄历信息"""
+    date: str = Field(..., description="日期")
+    lunar_date: str = Field(default="", description="农历日期")
+    gan_zhi: str = Field(default="", description="干支")
+    suitable: List[str] = Field(default_factory=list, description="宜")
+    avoid: List[str] = Field(default_factory=list, description="忌")
+    summary: str = Field(default="", description="宜忌摘要")
+
+
 class TripPlan(BaseModel):
     """旅行计划"""
     city: str = Field(..., description="目的地城市")
@@ -90,6 +110,10 @@ class TripPlan(BaseModel):
     weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
     overall_suggestions: str = Field(..., description="总体建议")
     budget: Optional[Budget] = Field(default=None, description="预算信息")
+    # 新增字段
+    transport_options: List[TransportOption] = Field(default_factory=list, description="交通方案")
+    lucky_day_info: Optional[LuckyDayInfo] = Field(default=None, description="黄历信息")
+    origin: str = Field(default="", description="出发地")
 
 
 class TripPlanResponse(BaseModel):

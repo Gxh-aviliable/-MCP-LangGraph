@@ -2,6 +2,10 @@
 
 支持对话式交互，用户可以通过自然对话描述需求
 
+支持双模型协作：
+- Qwen3: 处理日常简单查询
+- DeepSeek R1: 处理复杂场景（多目的地、预算优化、特殊需求）
+
 使用方式:
     from backend.agent import ChatSession
 
@@ -37,11 +41,13 @@ from backend.agent.nodes import (
     confirm_check_node,
     stage_router_node,
 )
+from backend.agent.router import analyze_query_complexity, get_scenario_description
+from backend.agent.tools.r1_tool import get_r1_instance
 from backend.model import TripPlan, TripRequest
 from backend.config.settings import settings
 
-# 设置环境变量
-os.environ["OPENAI_API_KEY"] = settings.deepseek_api_key or "sk-placeholder"
+# 设置环境变量（用于 LangChain）
+os.environ["OPENAI_API_KEY"] = settings.dashscope_api_key or "sk-placeholder"
 
 # 确认关键词（从统一配置读取）
 CONFIRM_KEYWORDS = settings.confirm_keywords
@@ -49,6 +55,8 @@ CONFIRM_KEYWORDS = settings.confirm_keywords
 # 调试模式
 if settings.debug:
     os.environ["LANGCHAIN_DEBUG"] = "true"
+    print(f"[Config] 主模型: {settings.primary_model}")
+    print(f"[Config] 推理模型: {settings.reasoning_model}")
 
 
 # ===================== 对话式 Agent 系统 =====================
@@ -59,16 +67,24 @@ class ChatAgentSystem:
     支持:
     - 对话收集需求
     - 自动分析信息完整性
+    - 双模型协作（Qwen3 + DeepSeek R1）
     - 生成行程
     - 多轮调整
     """
 
     def __init__(self):
+        # === 双模型配置 ===
+        # Qwen3 - 主模型（日常决策、信息提取）
         self.llm = ChatOpenAI(
-            model='deepseek-chat',
-            api_key=settings.deepseek_api_key,
-            base_url='https://api.deepseek.com'
+            model=settings.primary_model,
+            openai_api_key=settings.dashscope_api_key,
+            openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            temperature=settings.llm_temperature
         )
+
+        # DeepSeek R1 - 推理模型（复杂场景，通过 r1_tool 调用）
+        self.r1_analyzer = get_r1_instance()
+
         self.amap_key = settings.amap_maps_api_key
         self.client = None
         self.tools = None
@@ -190,6 +206,43 @@ class ChatAgentSystem:
     async def parse_intent(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """解析用户意图"""
         return await parse_intent_node(self.llm, state)
+
+    async def analyze_complexity(
+        self,
+        user_query: str,
+        collected_info: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """分析查询复杂度，决定使用哪个模型
+
+        Args:
+            user_query: 用户查询
+            collected_info: 已收集的信息
+
+        Returns:
+            {
+                "scenario_type": "simple" | "complex" | "multi_destination",
+                "needs_r1": bool,
+                "extraction": {...},
+                "reason": "原因说明"
+            }
+        """
+        return await analyze_query_complexity(user_query, self.llm, collected_info)
+
+    async def deep_analyze_with_r1(
+        self,
+        problem: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """使用 R1 进行深度分析
+
+        Args:
+            problem: 需要分析的问题
+            context: 上下文信息
+
+        Returns:
+            分析结果
+        """
+        return await self.r1_analyzer.analyze(problem, context)
 
 
 # ===================== 对话会话管理 =====================
