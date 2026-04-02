@@ -127,11 +127,10 @@ class ChatAgentSystem:
         workflow.add_node("analyzer", analyzer_node)
         workflow.add_node("response", response_node)
 
-        # 设置入口点
-        workflow.set_entry_point("greeting")
+        # 设置入口点 - 直接从 analyzer 开始（greeting 通过 start() 方法单独调用）
+        workflow.set_entry_point("analyzer")
 
         # 添加边
-        workflow.add_edge("greeting", END)  # 问候后等待用户输入
         workflow.add_edge("analyzer", "response")
         workflow.add_edge("response", END)  # 回复后等待用户输入
 
@@ -170,10 +169,18 @@ class ChatAgentSystem:
 
         return workflow.compile(checkpointer=self.checkpointer)
 
-    async def generate_plan(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """根据收集的信息生成行程"""
+    async def generate_plan(self, state: Dict[str, Any], config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """根据收集的信息生成行程
+
+        Args:
+            state: 状态数据
+            config: LangGraph 配置（可选）
+        """
         print(f"\n[Planning] 开始生成行程: {state.get('city')}, {state.get('start_date')} - {state.get('end_date')}")
-        result = await self.plan_graph.ainvoke(state)
+        if config:
+            result = await self.plan_graph.ainvoke(state, config)
+        else:
+            result = await self.plan_graph.ainvoke(state)
         return result
 
     async def adjust_plan(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -215,13 +222,16 @@ class ChatSession:
         await self.initialize()
 
         if not self._has_sent_greeting:
-            # 创建初始状态并获取问候
-            initial_state = create_initial_state()
-            result = await self.system.chat_graph.ainvoke(initial_state, self.config)
+            # 直接生成问候消息，不通过 graph
+            from backend.prompts import GREETING_MESSAGE
             self._has_sent_greeting = True
 
+            # 初始化状态
+            initial_state = create_initial_state()
+            await self.system.chat_graph.aupdate_state(self.config, initial_state)
+
             return {
-                "reply": result.get('bot_reply', "您好！请告诉我您的旅行需求。"),
+                "reply": GREETING_MESSAGE,
                 "stage": "greeting",
                 "collected_info": {},
                 "missing_fields": REQUIRED_FIELDS.copy(),
@@ -301,7 +311,7 @@ class ChatSession:
         }
 
         # 执行规划
-        plan_result = await self.system.generate_plan(plan_input)
+        plan_result = await self.system.generate_plan(plan_input, self.config)
         final_plan = plan_result.get('final_plan')
 
         # 更新对话状态
@@ -444,7 +454,7 @@ class TripChatSession(ChatSession):
         if request:
             # 表单模式：直接生成行程
             inputs = create_initial_state(request)
-            result = await self.system.generate_plan(inputs)
+            result = await self.system.generate_plan(inputs, self.config)
 
             # 更新状态
             await self.system.chat_graph.aupdate_state(
