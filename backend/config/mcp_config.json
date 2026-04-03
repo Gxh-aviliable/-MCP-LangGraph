@@ -4,19 +4,23 @@
             "name": "Gaode Server",
             "description": "高德地图服务 - POI搜索、天气查询、路线规划、酒店搜索",
             "url": "${MCP_GAODE_URL}",
-            "enabled": true
+            "enabled": false
         },
         {
             "name": "12306 Server",
             "description": "12306火车票服务 - 车次查询、票价查询、站点查询",
-            "url": "${MCP_12306_URL}",
+            "type": "streamable_http",
+            "url": "https://mcp.api-inference.modelscope.net/421163e7fc114a/mcp",
+            "headers": {
+                "Authorization": "Bearer ms-452d70de-4e52-4970-842c-54395dc3fdc5"
+            },
             "enabled": true
         },
         {
             "name": "bazi Server",
             "description": "八字黄历服务 - 农历查询、黄历宜忌、吉日查询",
-            "url": "${MCP_BAZI_URL}",
-            "enabled": true
+            "url": "https://mcp.api-inference.modelscope.net/d5b127c9d4cf48/sse",
+            "enabled": false
         },
         {
             "name": "flight Server",

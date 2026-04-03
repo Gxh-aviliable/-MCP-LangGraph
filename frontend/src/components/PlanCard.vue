@@ -1,5 +1,10 @@
 <template>
-  <div class="plan-card">
+  <div class="plan-card" ref="planCardRef">
+    <!-- 导出按钮 -->
+    <button class="export-btn" @click="exportToPdf" :disabled="exporting">
+      {{ exporting ? '导出中...' : '📄 导出 PDF' }}
+    </button>
+
     <!-- 头部 -->
     <div class="plan-header">
       <h3>📋 {{ plan.city }} 旅行计划</h3>
@@ -134,9 +139,15 @@
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
+import html2pdf from 'html2pdf.js'
+
 defineProps<{
   plan: any
 }>()
+
+const planCardRef = ref<HTMLElement | null>(null)
+const exporting = ref(false)
 
 function formatDate(dateStr: string): string {
   if (!dateStr) return ''
@@ -155,6 +166,44 @@ function getTransportIcon(type: string): string {
   }
   return icons[type] || '🚀'
 }
+
+async function exportToPdf() {
+  if (!planCardRef.value || exporting.value) return
+
+  exporting.value = true
+
+  try {
+    // 隐藏导出按钮
+    const exportBtn = planCardRef.value.querySelector('.export-btn') as HTMLElement
+    if (exportBtn) exportBtn.style.display = 'none'
+
+    const opt = {
+      margin: [10, 10, 10, 10],
+      filename: `旅行计划_${new Date().toLocaleDateString('zh-CN')}.pdf`,
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: {
+        scale: 2,
+        useCORS: true,
+        logging: false
+      },
+      jsPDF: {
+        unit: 'mm',
+        format: 'a4',
+        orientation: 'portrait'
+      }
+    }
+
+    await html2pdf().set(opt).from(planCardRef.value).save()
+
+    // 恢复导出按钮
+    if (exportBtn) exportBtn.style.display = 'block'
+  } catch (error) {
+    console.error('PDF 导出失败:', error)
+    alert('导出失败，请重试')
+  } finally {
+    exporting.value = false
+  }
+}
 </script>
 
 <style scoped>
@@ -164,6 +213,33 @@ function getTransportIcon(type: string): string {
   border-radius: 12px;
   overflow: hidden;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  position: relative;
+}
+
+.export-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 8px 16px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  z-index: 10;
+  transition: all 0.2s;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.export-btn:hover:not(:disabled) {
+  background: #f5f5f5;
+  border-color: #3498db;
+  color: #3498db;
+}
+
+.export-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .plan-header {

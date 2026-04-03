@@ -101,28 +101,47 @@ const quickReplies = computed(() => {
 // 加载保存的会话
 async function loadSavedSession() {
   const saved = localStorage.getItem(STORAGE_KEY)
+  console.log('[loadSavedSession] saved:', saved)
+
   if (saved) {
     try {
       const data = JSON.parse(saved)
-      if (data.sessionId && Date.now() - data.timestamp < 24 * 60 * 60 * 1000) {
-        // 会话有效（24小时内）
-        sessionId.value = data.sessionId
+      console.log('[loadSavedSession] parsed data:', data)
 
-        // 获取会话状态
-        const status = await api.getChatStatus(data.sessionId)
-        if (status.success) {
-          stage.value = status.stage
-          // 不恢复历史消息，让用户重新开始对话
-        } else {
-          // 会话已过期，清除
+      // 检查时间戳是否在24小时内
+      if (data.sessionId && Date.now() - data.timestamp < 24 * 60 * 60 * 1000) {
+        // 先验证会话是否有效
+        try {
+          console.log('[loadSavedSession] checking session:', data.sessionId)
+          const status = await api.getChatStatus(data.sessionId)
+          console.log('[loadSavedSession] status response:', status)
+
+          if (status.success) {
+            // 会话有效，恢复
+            sessionId.value = data.sessionId
+            stage.value = status.stage
+            console.log('[loadSavedSession] session restored')
+          } else {
+            // 会话已过期，清除
+            console.log('[loadSavedSession] session expired, clearing')
+            clearSession()
+          }
+        } catch (e) {
+          // 网络错误或其他问题，清除旧会话
+          console.error('[loadSavedSession] error checking session:', e)
           clearSession()
         }
       } else {
+        // 时间过期或无 sessionId，清除
+        console.log('[loadSavedSession] timestamp expired or no sessionId, clearing')
         clearSession()
       }
-    } catch {
+    } catch (e) {
+      console.error('[loadSavedSession] parse error:', e)
       clearSession()
     }
+  } else {
+    console.log('[loadSavedSession] no saved session')
   }
 }
 
@@ -217,13 +236,19 @@ async function sendMessage() {
 
 // 初始化
 onMounted(async () => {
-  await loadSavedSession()
+  console.log('[onMounted] starting initialization...')
+  loading.value = true
 
-  // 如果是新会话，获取问候消息
-  if (!sessionId.value) {
-    loading.value = true
-    try {
+  try {
+    await loadSavedSession()
+    console.log('[onMounted] loadSavedSession done, sessionId:', sessionId.value)
+
+    // 如果是新会话，获取问候消息
+    if (!sessionId.value) {
+      console.log('[onMounted] fetching greeting...')
       const response = await api.chat({ message: '' })
+      console.log('[onMounted] greeting response:', response)
+
       if (response.success) {
         sessionId.value = response.session_id
         stage.value = response.stage
@@ -232,23 +257,33 @@ onMounted(async () => {
           content: response.reply
         })
         saveSession()
+        console.log('[onMounted] greeting displayed')
+      } else {
+        console.error('[onMounted] greeting failed:', response)
+        messages.value.push({
+          role: 'assistant',
+          content: '您好！我是旅行规划助手，可以帮您规划行程。请告诉我您想去哪里旅行？'
+        })
       }
-    } catch {
+    } else {
+      // 恢复会话时显示提示
+      console.log('[onMounted] restoring session')
       messages.value.push({
         role: 'assistant',
-        content: '您好！我是旅行规划助手，可以帮您规划行程。请告诉我您想去哪里旅行？'
+        content: '欢迎回来！请继续告诉我您的旅行需求。'
       })
-    } finally {
-      loading.value = false
-      scrollToBottom()
     }
-  } else {
-    // 恢复会话时显示提示
+  } catch (error) {
+    console.error('[onMounted] initialization error:', error)
     messages.value.push({
       role: 'assistant',
-      content: '欢迎回来！请继续告诉我您的旅行需求。'
+      content: '您好！我是旅行规划助手，可以帮您规划行程。请告诉我您想去哪里旅行？'
     })
+    clearSession()
+  } finally {
+    loading.value = false
     scrollToBottom()
+    console.log('[onMounted] initialization complete')
   }
 })
 

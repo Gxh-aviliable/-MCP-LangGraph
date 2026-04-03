@@ -19,6 +19,7 @@ import os
 import sys
 import io
 import uuid
+import json
 from typing import Dict, Any, Optional
 
 from langgraph.graph import StateGraph, END
@@ -40,6 +41,8 @@ from backend.agent.nodes import (
     response_generator_node,
     confirm_check_node,
     stage_router_node,
+    create_transport_node_v3,
+    create_lucky_day_node_v2,
 )
 from backend.agent.router import analyze_query_complexity, get_scenario_description
 from backend.agent.tools.r1_tool import get_r1_instance
@@ -97,6 +100,20 @@ class ChatAgentSystem:
         if not self.amap_key:
             raise ValueError("AMAP_MAPS_API_KEY 未设置")
 
+        # === 读取 MCP 配置文件 ===
+        import json
+        from pathlib import Path
+        config_path = Path(__file__).parent.parent / "config" / "mcp_config.json"
+
+        mcp_servers_config = {}
+        if config_path.exists():
+            with open(config_path, 'r', encoding='utf-8') as f:
+                mcp_config = json.load(f)
+                for server in mcp_config.get("mcp_servers", []):
+                    if server.get("enabled") and server.get("url") and not server["url"].startswith("${"):
+                        mcp_servers_config[server["name"]] = server
+
+        # === 第一步：初始化高德地图 MCP (stdio 方式) - 必须成功 ===
         server_config = {
             "amap": {
                 "command": "uvx",
@@ -114,19 +131,57 @@ class ChatAgentSystem:
             self.tools = await self.client.get_tools()
 
             if not self.tools:
-                raise ValueError("未能加载任何工具")
+                raise ValueError("未能加载高德地图工具")
 
             tool_names = [t.name for t in self.tools]
-            print(f"[OK] 成功加载工具: {tool_names}")
-
-            # 创建对话流程图
-            self.chat_graph = self._create_chat_graph()
-            # 创建规划流程图
-            self.plan_graph = self._create_plan_graph()
+            print(f"[OK] 高德地图工具加载成功 ({len(tool_names)} 个)")
 
         except Exception as e:
-            print(f"[FAIL] MCP 初始化失败: {str(e)}")
+            print(f"[FAIL] 高德地图 MCP 初始化失败: {str(e)}")
             raise
+
+        # === 第二步：尝试添加 SSE MCP 服务器 - 可选 ===
+        for name, server in mcp_servers_config.items():
+            url = server.get("url", "")
+            if url and not url.startswith("${"):
+                print(f"[MCP] 尝试连接 SSE 服务器: {name}")
+                try:
+                    # 创建新的客户端配置，包含已有的和新的服务器
+                    new_config = dict(self.client.connections)
+                    # 从配置文件读取 transport 类型，支持 sse 和 streamable_http
+                    transport_type = server.get("type", "sse")
+                    server_config = {
+                        "url": url,
+                        "transport": transport_type
+                    }
+                    # 添加 headers 支持（如 Authorization）
+                    if server.get("headers"):
+                        server_config["headers"] = server["headers"]
+
+                    new_config[name] = server_config
+
+                    new_client = MultiServerMCPClient(new_config)
+                    new_tools = await new_client.get_tools(server_name=name)
+
+                    if new_tools:
+                        # 成功获取工具，更新客户端
+                        self.client = new_client
+                        self.tools.extend(new_tools)
+                        print(f"[OK] SSE 服务器 {name} 连接成功，获取 {len(new_tools)} 个工具")
+                    else:
+                        print(f"[WARN] SSE 服务器 {name} 未返回工具")
+
+                except Exception as e:
+                    print(f"[WARN] SSE 服务器 {name} 连接失败: {str(e)[:100]}")
+                    # 继续执行，不影响其他功能
+
+        # 打印最终加载的工具
+        final_tool_names = [t.name for t in self.tools]
+        print(f"[OK] 总共加载 {len(final_tool_names)} 个工具")
+
+        # 创建流程图
+        self.chat_graph = self._create_chat_graph()
+        self.plan_graph = self._create_plan_graph()
 
     def _create_chat_graph(self) -> StateGraph:
         """构建对话流程图"""
@@ -153,10 +208,13 @@ class ChatAgentSystem:
         return workflow.compile(checkpointer=self.checkpointer)
 
     def _create_plan_graph(self) -> StateGraph:
-        """构建规划流程图（生成行程）"""
+        """构建规划流程图（生成行程）
+
+        流程: 景点专家 → 天气专家 → 交通专家 → 黄历专家 → 酒店专家 → 规划节点
+        """
         workflow = StateGraph(ChatAgentState)
 
-        # 专家节点
+        # === 专家节点 ===
         workflow.add_node(
             "attraction_expert",
             create_attraction_node(self.llm, self.tools)
@@ -170,16 +228,31 @@ class ChatAgentSystem:
             create_hotel_node(self.llm, self.tools)
         )
 
-        # 规划节点
+        # === 交通专家节点 (V3: 使用 LLM + 工具调用) ===
+        workflow.add_node(
+            "transport_expert",
+            create_transport_node_v3(self.llm, self.client)
+        )
+
+        # === 黄历专家节点 ===
+        async def lucky_day_node(state):
+            return await create_lucky_day_node_v2(self.client, state)
+
+        workflow.add_node("lucky_day_expert", lucky_day_node)
+
+        # === 规划节点 ===
         async def plan_node(state):
             return await plan_trip_node(self.llm, state)
 
         workflow.add_node("plan_trip", plan_node)
 
-        # 执行流程
+        # === 执行流程 ===
+        # 景点 → 天气 → 交通 → 黄历 → 酒店 → 规划
         workflow.set_entry_point("attraction_expert")
         workflow.add_edge("attraction_expert", "weather_expert")
-        workflow.add_edge("weather_expert", "hotel_expert")
+        workflow.add_edge("weather_expert", "transport_expert")
+        workflow.add_edge("transport_expert", "lucky_day_expert")
+        workflow.add_edge("lucky_day_expert", "hotel_expert")
         workflow.add_edge("hotel_expert", "plan_trip")
         workflow.add_edge("plan_trip", END)
 
@@ -348,6 +421,7 @@ class ChatSession:
 
         # 构建规划输入
         plan_input = {
+            "origin": collected_info.get('origin', ''),
             "city": collected_info.get('city', ''),
             "start_date": collected_info.get('start_date', ''),
             "end_date": collected_info.get('end_date', ''),
@@ -355,6 +429,12 @@ class ChatSession:
             "budget_per_day": collected_info.get('budget_per_day'),
             "accommodation_type": collected_info.get('accommodation_type'),
             "transportation_mode": None,
+            # 初始化中间结果字段
+            "attractions_data": [],
+            "weather_data": [],
+            "hotels_data": [],
+            "transport_data": [],
+            "lucky_day_data": [],
             # 保持其他状态
             "conversation_stage": "planning",
             "collected_info": collected_info,
@@ -516,6 +596,7 @@ class TripChatSession(ChatSession):
                     "final_plan": result.get('final_plan'),
                     "conversation_stage": "refining",
                     "collected_info": {
+                        "origin": request.origin,
                         "city": request.city,
                         "start_date": request.start_date,
                         "end_date": request.end_date,

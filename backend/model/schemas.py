@@ -43,6 +43,7 @@ class Hotel(BaseModel):
 
 class Budget(BaseModel):
     """预算信息"""
+    transport: int = Field(default=0, description="交通费用")
     total_attractions: int = Field(default=0,description="景点门票总费用")
     total_hotels: int = Field(default=0,description="酒店总费用")
     total_meals: int = Field(default=0,description="餐饮总费用")
@@ -98,22 +99,30 @@ class LuckyDayInfo(BaseModel):
     gan_zhi: str = Field(default="", description="干支")
     suitable: List[str] = Field(default_factory=list, description="宜")
     avoid: List[str] = Field(default_factory=list, description="忌")
+    travel_suitable: bool = Field(default=True, description="是否适合出行")
     summary: str = Field(default="", description="宜忌摘要")
+
+
+class RecommendedTransport(BaseModel):
+    """推荐的交通方案"""
+    type: str = Field(..., description="交通类型")
+    name: str = Field(..., description="推荐的具体车次/路线")
+    reason: str = Field(default="", description="推荐理由")
 
 
 class TripPlan(BaseModel):
     """旅行计划"""
+    origin: str = Field(default="", description="出发地")
     city: str = Field(..., description="目的地城市")
     start_date: str = Field(..., description="开始日期")
     end_date: str = Field(..., description="结束日期")
+    transport_options: List[TransportOption] = Field(default_factory=list, description="交通方案列表")
+    recommended_transport: Optional[RecommendedTransport] = Field(default=None, description="推荐的交通方案")
     days: List[DayPlan] = Field(..., description="每日行程")
     weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
+    lucky_day_info: Optional[LuckyDayInfo] = Field(default=None, description="黄历信息")
     overall_suggestions: str = Field(..., description="总体建议")
     budget: Optional[Budget] = Field(default=None, description="预算信息")
-    # 新增字段
-    transport_options: List[TransportOption] = Field(default_factory=list, description="交通方案")
-    lucky_day_info: Optional[LuckyDayInfo] = Field(default=None, description="黄历信息")
-    origin: str = Field(default="", description="出发地")
 
 
 class TripPlanResponse(BaseModel):
@@ -125,6 +134,7 @@ class TripPlanResponse(BaseModel):
 """"=======================请求模型========================"""
 class TripRequest(BaseModel):
     """旅行计划请求"""
+    origin: Optional[str] = Field(default=None, description="出发城市")
     city: str = Field(..., description="目的地城市")
     start_date: str = Field(..., description="开始日期 YYYY-MM-DD")
     end_date: str = Field(..., description="结束日期 YYYY-MM-DD")
@@ -149,6 +159,7 @@ class ChatRequest(BaseModel):
 
 class CollectedInfo(BaseModel):
     """已收集的旅行信息"""
+    origin: Optional[str] = Field(default=None, description="出发城市")
     city: Optional[str] = Field(default=None, description="目的地城市")
     start_date: Optional[str] = Field(default=None, description="开始日期")
     end_date: Optional[str] = Field(default=None, description="结束日期")

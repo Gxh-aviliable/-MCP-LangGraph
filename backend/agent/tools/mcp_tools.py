@@ -39,10 +39,13 @@ class MCPToolManager:
         if self._initialized:
             return len(self.mcp_servers) > 0
 
-        config_full_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-            self.config_path
-        )
+        # 获取项目根目录（backend 的父目录）
+        # __file__ = backend/agent/tools/mcp_tools.py
+        # dirname(__file__) = backend/agent/tools
+        # dirname 3次 = backend，但配置路径已经是 backend/config/...
+        # 所以只需要 dirname 2次，得到 backend/agent，然后拼接到项目根
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        config_full_path = os.path.join(project_root, self.config_path)
 
         if not os.path.exists(config_full_path):
             print(f"[MCP] 配置文件不存在: {config_full_path}")
@@ -76,13 +79,13 @@ class MCPToolManager:
                 )
                 self.mcp_servers[name] = server
                 success_count += 1
-                print(f"[MCP] ✅ 连接成功: {name}")
+                print(f"[MCP] 连接成功: {name}")
 
             except ImportError:
-                print(f"[MCP] ⚠️ 未安装 agents.mcp，使用本地工具模式")
+                print(f"[MCP] 未安装 agents.mcp，使用本地工具模式")
                 break
             except Exception as e:
-                print(f"[MCP] ❌ 连接失败 {name}: {str(e)}")
+                print(f"[MCP] 连接失败 {name}: {str(e)}")
 
         self._initialized = True
         return success_count > 0
@@ -118,7 +121,7 @@ class MCPToolManager:
         for attempt in range(max_retries + 1):
             try:
                 if attempt > 0:
-                    print(f"[MCP] 🔄 第{attempt}次重试 {server_name}.{tool_name}...")
+                    print(f"[MCP] 第{attempt}次重试 {server_name}.{tool_name}...")
                     await asyncio.sleep(1 * attempt)  # 指数退避
 
                 # 带超时的调用
@@ -135,7 +138,7 @@ class MCPToolManager:
 
             except asyncio.TimeoutError:
                 last_error = TimeoutError(f"工具调用超时 ({timeout}秒)")
-                print(f"[MCP] ⚠️ {server_name}.{tool_name} 超时")
+                print(f"[MCP] {server_name}.{tool_name} 超时")
 
             except Exception as e:
                 last_error = e
@@ -150,7 +153,7 @@ class MCPToolManager:
                 ])
 
                 if is_retryable and attempt < max_retries:
-                    print(f"[MCP] ⚠️ {server_name}.{tool_name} 连接中断，将重试...")
+                    print(f"[MCP] {server_name}.{tool_name} 连接中断，将重试...")
                     continue
                 else:
                     break

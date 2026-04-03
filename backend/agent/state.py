@@ -10,6 +10,7 @@ class ChatAgentState(TypedDict):
     """多轮对话状态 - 支持持续性交互"""
 
     # ==================== 用户输入信息 ====================
+    origin: str                                   # 出发城市（必要字段）
     city: str                                    # 目标城市
     start_date: str                              # 开始日期 YYYY-MM-DD
     end_date: str                                # 结束日期 YYYY-MM-DD
@@ -22,6 +23,8 @@ class ChatAgentState(TypedDict):
     attractions_data: Annotated[List[Dict[str, Any]], operator.add]    # 景点数据
     weather_data: Annotated[List[Dict[str, Any]], operator.add]        # 天气数据
     hotels_data: Annotated[List[Dict[str, Any]], operator.add]         # 酒店数据
+    transport_data: Annotated[List[Dict[str, Any]], operator.add]      # 交通数据（火车票/自驾）
+    lucky_day_data: Annotated[List[Dict[str, Any]], operator.add]      # 黄历数据
 
     # ==================== 对话相关 ====================
     messages: Annotated[List[Dict[str, str]], operator.add]  # 对话历史
@@ -49,8 +52,8 @@ class ChatAgentState(TypedDict):
     bot_reply: Optional[str]           # 机器人回复（用于响应生成）
 
 
-# 必要字段列表
-REQUIRED_FIELDS = ['city', 'start_date', 'end_date']
+# 必要字段列表（出发地为必要字段，用于查询火车票）
+REQUIRED_FIELDS = ['origin', 'city', 'start_date', 'end_date']
 
 
 def create_initial_state(request=None) -> Dict[str, Any]:
@@ -66,6 +69,7 @@ def create_initial_state(request=None) -> Dict[str, Any]:
         # 表单模式：已有完整信息
         return {
             # 用户输入
+            "origin": request.origin or "",
             "city": request.city,
             "start_date": request.start_date,
             "end_date": request.end_date,
@@ -77,6 +81,8 @@ def create_initial_state(request=None) -> Dict[str, Any]:
             "attractions_data": [],
             "weather_data": [],
             "hotels_data": [],
+            "transport_data": [],
+            "lucky_day_data": [],
             # 对话相关
             "messages": [],
             "user_feedback": None,
@@ -103,6 +109,7 @@ def create_initial_state(request=None) -> Dict[str, Any]:
         # 对话模式：从问候开始
         return {
             # 用户输入（初始为空）
+            "origin": "",
             "city": "",
             "start_date": "",
             "end_date": "",
@@ -114,6 +121,8 @@ def create_initial_state(request=None) -> Dict[str, Any]:
             "attractions_data": [],
             "weather_data": [],
             "hotels_data": [],
+            "transport_data": [],
+            "lucky_day_data": [],
             # 对话相关
             "messages": [],
             "user_feedback": None,

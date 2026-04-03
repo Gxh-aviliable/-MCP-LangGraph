@@ -15,6 +15,9 @@ from backend.prompts import (
     ATTRACTION_AGENT_PROMPT,
     WEATHER_AGENT_PROMPT,
     HOTEL_AGENT_PROMPT,
+    TRANSPORT_AGENT_PROMPT,
+    TRANSPORT_AGENT_PROMPT_V3,
+    LUCKY_DAY_AGENT_PROMPT,
     PLANNER_AGENT_PROMPT,
     INTENT_PARSER_PROMPT,
     ADJUSTMENT_PROMPT,
@@ -268,8 +271,11 @@ async def plan_trip_node(llm, state: ChatAgentState) -> Dict[str, Any]:
         attractions = state.get('attractions_data', [])
         weather_info = state.get('weather_data', [])
         hotels = state.get('hotels_data', [])
+        transport_data = state.get('transport_data', [])
+        lucky_day_data = state.get('lucky_day_data', [])
 
         print(f"   景点: {len(attractions)} 条, 天气: {len(weather_info)} 条, 酒店: {len(hotels)} 条")
+        print(f"   交通: {len(transport_data)} 条, 黄历: {len(lucky_day_data)} 条")
 
         planner_prompt = ChatPromptTemplate.from_messages([
             ("system", PLANNER_AGENT_PROMPT),
@@ -282,12 +288,27 @@ async def plan_trip_node(llm, state: ChatAgentState) -> Dict[str, Any]:
         weather_summary = format_weather(weather_info)
         hotels_summary = format_hotels(hotels)
 
+        # 格式化交通信息
+        transport_summary = "暂无交通信息"
+        if transport_data:
+            transport_lines = []
+            for t in transport_data[:5]:
+                transport_lines.append(f"- {t.get('name', '未知')}: 耗时{t.get('duration', '未知')}, 费用{t.get('cost', 0)}元")
+            transport_summary = "\n".join(transport_lines)
+
+        # 格式化黄历信息
+        lucky_summary = "暂无黄历信息"
+        if lucky_day_data:
+            lucky_info = lucky_day_data[0]
+            lucky_summary = lucky_info.get('summary', '')
+
         res = await planner_chain.ainvoke({
             "context": f"""
 根据以下信息为用户生成详细的旅行计划：
 
 [用户需求]
-- 城市: {state['city']}
+- 出发地: {state.get('origin', '未指定')}
+- 目的地: {state['city']}
 - 日期: {state['start_date']} 至 {state['end_date']} ({trip_days}天)
 - 兴趣: {', '.join(state['interests'])}
 - 住宿: {state.get('accommodation_type') or '未指定'}
@@ -302,13 +323,42 @@ async def plan_trip_node(llm, state: ChatAgentState) -> Dict[str, Any]:
 【酒店选项】
 {hotels_summary}
 
+【交通方案】
+{transport_summary}
+
+【黄历参考】
+{lucky_summary}
+
 请生成完整的 {trip_days} 天行程计划。
 """
         })
 
+        # 获取生成的计划并填充额外字段
+        plan_dict = res.model_dump()
+
+        # 填充交通方案
+        if transport_data:
+            plan_dict['transport_options'] = [
+                {
+                    "type": t.get('type', 'unknown'),
+                    "name": t.get('name', ''),
+                    "duration": t.get('duration', ''),
+                    "cost": t.get('cost', 0),
+                    "details": t.get('details', {})
+                }
+                for t in transport_data
+            ]
+
+        # 填充黄历信息
+        if lucky_day_data:
+            plan_dict['lucky_day_info'] = lucky_day_data[0]
+
+        # 填充出发地
+        plan_dict['origin'] = state.get('origin', '')
+
         print("[OK] 行程规划完成")
         return {
-            "final_plan": res.model_dump(),
+            "final_plan": plan_dict,
             "messages": [{"role": "assistant", "content": "行程规划已完成，请查看并提出您的反馈。"}]
         }
 
@@ -481,6 +531,7 @@ async def requirement_analyzer_node(llm, state: ChatAgentState) -> Dict[str, Any
             print(f"[OK] 提取信息: {extracted}, 缺失: {missing}, 就绪: {ready}")
 
             # 更新状态字段
+            origin = new_collected.get('origin', '')
             city = new_collected.get('city', '')
             start_date = new_collected.get('start_date', '')
             end_date = new_collected.get('end_date', '')
@@ -489,6 +540,7 @@ async def requirement_analyzer_node(llm, state: ChatAgentState) -> Dict[str, Any
                 "collected_info": new_collected,
                 "missing_fields": missing,
                 "ready_to_plan": ready,
+                "origin": origin,
                 "city": city,
                 "start_date": start_date,
                 "end_date": end_date,
@@ -545,7 +597,12 @@ async def response_generator_node(llm, state: ChatAgentState) -> Dict[str, Any]:
         if json_match:
             result = json.loads(json_match.group())
             reply = result.get('reply', '请告诉我您的旅行需求。')
-            print(f"[OK] 生成回复: {reply[:50]}...")
+            # 安全打印，避免Windows终端编码错误
+            try:
+                safe_reply = reply[:50].encode('utf-8', errors='replace').decode('utf-8')
+                print(f"[OK] 生成回复: {safe_reply}...")
+            except:
+                print(f"[OK] 生成回复: (包含特殊字符)")
             return {
                 "bot_reply": reply,
                 "messages": [{"role": "assistant", "content": reply}]
@@ -617,3 +674,489 @@ async def stage_router_node(state: ChatAgentState) -> str:
         return "planning"
 
     return "collecting"
+
+
+# ===================== 交通查询节点 =====================
+
+def create_transport_node_v3(llm, mcp_client):
+    """创建交通专家节点 V3 - 使用 LLM + 工具调用
+
+    与景点专家类似的架构，更健壮的错误处理
+    """
+    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+    from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
+    import asyncio
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", TRANSPORT_AGENT_PROMPT_V3),
+        ("user", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ])
+
+    async def node(state: ChatAgentState) -> Dict[str, Any]:
+        try:
+            origin = state.get('origin', '')
+            destination = state.get('city', '')
+            start_date = state.get('start_date', '')
+
+            print(f"\n[Transport] 查询交通: {origin} -> {destination}, 日期: {start_date}")
+
+            if not origin:
+                print("[Transport] 无出发地，跳过交通查询")
+                return {"transport_data": []}
+
+            # 获取 12306 工具
+            try:
+                train_tools = await mcp_client.get_tools(server_name="12306 Server")
+                print(f"[Transport] 获取到 {len(train_tools)} 个 12306 工具")
+            except Exception as e:
+                print(f"[Transport] 获取 12306 工具失败: {e}")
+                return {"transport_data": []}
+
+            # 过滤出需要的工具
+            filtered_tools = []
+            for tool in train_tools:
+                name_lower = tool.name.lower()
+                if "station" in name_lower or "ticket" in name_lower:
+                    if "interline" not in name_lower:
+                        filtered_tools.append(tool)
+
+            if not filtered_tools:
+                print("[Transport] 未找到可用的交通查询工具")
+                return {"transport_data": []}
+
+            print(f"[Transport] 使用工具: {[t.name for t in filtered_tools]}")
+
+            agent = create_tool_calling_agent(llm, filtered_tools, prompt)
+            executor = AgentExecutor(
+                agent=agent,
+                tools=filtered_tools,
+                verbose=settings.debug,
+                max_iterations=5,
+                handle_parsing_errors=True
+            )
+
+            input_str = f"""请查询从 {origin} 到 {destination} 的火车票，出发日期：{start_date}
+
+步骤：
+1. 调用 get-stations-code-in-city 获取 {origin} 的站点代码
+2. 调用 get-stations-code-in-city 获取 {destination} 的站点代码
+3. 调用 get-tickets 查询车票（参数：fromStation, toStation, date）
+
+最后将结果整理成 JSON 数组输出。"""
+
+            # 添加超时保护（60秒）
+            try:
+                result = await asyncio.wait_for(
+                    executor.ainvoke({"input": input_str}),
+                    timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                print("[Transport] 查询超时（60秒），跳过交通查询")
+                return {"transport_data": []}
+
+            output_text = result.get('output', '')
+
+            # 提取 JSON 数据
+            structured_data = extract_json_from_text(output_text)
+
+            # 转换为标准格式
+            transport_results = []
+            for item in structured_data:
+                if isinstance(item, dict):
+                    transport_results.append({
+                        "type": item.get("type", "train"),
+                        "name": item.get("name", item.get("trainCode", item.get("train_code", "未知"))),
+                        "duration": item.get("duration", item.get("runTime", "")),
+                        "cost": item.get("cost", item.get("price", 0)),
+                        "details": item
+                    })
+
+            print(f"[OK] Transport 查询到 {len(transport_results)} 条交通方案")
+            return {"transport_data": transport_results}
+
+        except Exception as e:
+            print(f"[FAIL] 交通查询错误: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {"transport_data": []}
+
+    return node
+
+
+async def create_transport_node(mcp_manager):
+    """创建交通查询节点（旧版，已废弃）"""
+    pass
+
+
+async def create_transport_node_v2(mcp_client, state: ChatAgentState) -> Dict[str, Any]:
+    """交通查询节点 V2 - 使用 MultiServerMCPClient
+
+    Args:
+        mcp_client: MultiServerMCPClient 实例
+        state: 当前状态
+
+    Returns:
+        包含交通数据的字典
+    """
+    try:
+        origin = state.get('origin', '')
+        destination = state.get('city', '')
+        start_date = state.get('start_date', '')
+
+        print(f"\n[Transport] 查询交通: {origin} -> {destination}, 日期: {start_date}")
+
+        if not origin:
+            print("[Transport] 无出发地，跳过交通查询")
+            return {"transport_data": []}
+
+        transport_results = []
+
+        # 获取 12306 服务器的工具
+        try:
+            train_tools = await mcp_client.get_tools(server_name="12306 Server")
+            print(f"[Transport] 获取到 {len(train_tools)} 个 12306 工具")
+
+            # 打印所有工具名称和参数
+            tool_info = {}
+            for tool in train_tools:
+                tool_info[tool.name] = tool
+                desc = tool.description[:80] if tool.description else "N/A"
+                print(f"  - {tool.name}: {desc}")
+
+            # 尝试查找站点查询工具 - 用于获取站点代码
+            station_code_tool = None
+            for name, tool in tool_info.items():
+                name_lower = name.lower()
+                if "station" in name_lower and "city" in name_lower:
+                    station_code_tool = tool
+                    print(f"[Transport] 找到站点代码工具: {name}")
+                    break
+
+            # 尝试查找车票查询工具
+            ticket_tool = None
+            for name, tool in tool_info.items():
+                name_lower = name.lower()
+                if "ticket" in name_lower and "interline" not in name_lower:
+                    ticket_tool = tool
+                    print(f"[Transport] 找到车票工具: {name}")
+                    break
+
+            # 如果找到了站点代码工具，先获取站点代码
+            from_station_code = None
+            to_station_code = None
+
+            if station_code_tool:
+                print(f"[Transport] 获取站点代码...")
+                try:
+                    # 获取出发城市站点代码
+                    origin_result = await station_code_tool.ainvoke({"city": origin})
+                    origin_codes = _parse_station_codes(origin_result)
+                    if origin_codes:
+                        from_station_code = origin_codes[0]
+                        print(f"[Transport] {origin} 站点代码: {from_station_code}")
+
+                    # 获取目的城市站点代码
+                    dest_result = await station_code_tool.ainvoke({"city": destination})
+                    dest_codes = _parse_station_codes(dest_result)
+                    if dest_codes:
+                        to_station_code = dest_codes[0]
+                        print(f"[Transport] {destination} 站点代码: {to_station_code}")
+
+                except Exception as e:
+                    print(f"[Transport] 站点代码查询失败: {e}")
+
+            # 如果找到了车票工具且有站点代码，查询车票
+            if ticket_tool and from_station_code and to_station_code:
+                print(f"[Transport] 使用车票工具: {ticket_tool.name}")
+                try:
+                    # 使用正确的参数: fromStation, toStation, date
+                    params = {
+                        "fromStation": from_station_code,
+                        "toStation": to_station_code,
+                        "date": start_date
+                    }
+                    print(f"[Transport] 查询参数: {params}")
+                    result = await ticket_tool.ainvoke(params)
+                    tickets_data = _parse_tickets_result(result)
+
+                    for ticket in tickets_data[:5]:
+                        transport_results.append({
+                            "type": "train",
+                            "name": ticket.get('trainCode', ticket.get('train_code', ticket.get('trainNo', '未知'))),
+                            "duration": ticket.get('duration', ticket.get('runTime', '')),
+                            "cost": ticket.get('price', 0),
+                            "details": ticket
+                        })
+
+                    print(f"[Transport] 查询到 {len(tickets_data)} 个车次")
+
+                except Exception as e:
+                    print(f"[Transport] 车票查询失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                if not station_code_tool:
+                    print("[Transport] 未找到站点代码工具")
+                if not from_station_code or not to_station_code:
+                    print(f"[Transport] 站点代码获取失败: from={from_station_code}, to={to_station_code}")
+
+        except Exception as e:
+            print(f"[Transport] 12306 查询失败: {e}")
+
+        # 尝试获取自驾路线（从高德地图工具）
+        try:
+            amap_tools = await mcp_client.get_tools(server_name="amap")
+            geo_tool = None
+            driving_tool = None
+
+            for tool in amap_tools:
+                if "geo" in tool.name.lower():
+                    geo_tool = tool
+                elif "driving" in tool.name.lower():
+                    driving_tool = tool
+
+            if geo_tool and driving_tool:
+                # 获取经纬度
+                origin_geo = await geo_tool.ainvoke({"address": origin})
+                dest_geo = await geo_tool.ainvoke({"address": destination})
+
+                origin_coords = _extract_coords(origin_geo)
+                dest_coords = _extract_coords(dest_geo)
+
+                if origin_coords and dest_coords:
+                    driving_result = await driving_tool.ainvoke({
+                        "origin": origin_coords,
+                        "destination": dest_coords
+                    })
+                    driving_data = _parse_driving_result(driving_result)
+
+                    if driving_data:
+                        transport_results.append({
+                            "type": "driving",
+                            "name": f"自驾: {origin} -> {destination}",
+                            "duration": driving_data.get('duration', ''),
+                            "cost": driving_data.get('tolls', 0),
+                            "details": driving_data
+                        })
+                        print(f"[Transport] 自驾路线: {driving_data.get('distance', '未知')} 公里")
+
+        except Exception as e:
+            print(f"[Transport] 自驾路线查询失败: {e}")
+
+        print(f"[OK] Transport 共查询到 {len(transport_results)} 条交通方案")
+        return {"transport_data": transport_results}
+
+    except Exception as e:
+        print(f"[FAIL] 交通查询错误: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"transport_data": []}
+
+
+def _parse_station_codes(result: Any) -> List[str]:
+    """解析站点代码结果"""
+    try:
+        if isinstance(result, str):
+            data = json.loads(result)
+        else:
+            data = result
+
+        if isinstance(data, dict):
+            if 'return' in data:
+                stations = data['return']
+            elif 'data' in data:
+                stations = data['data']
+            else:
+                stations = data
+        else:
+            stations = data
+
+        if isinstance(stations, list):
+            codes = []
+            for station in stations:
+                if isinstance(station, dict):
+                    code = station.get('station_code') or station.get('code') or station.get('telecode')
+                    if code:
+                        codes.append(code)
+            return codes
+        return []
+    except:
+        return []
+
+
+def _parse_tickets_result(result: Any) -> List[Dict]:
+    """解析火车票查询结果"""
+    try:
+        if isinstance(result, str):
+            data = json.loads(result)
+        else:
+            data = result
+
+        if isinstance(data, dict):
+            if 'return' in data:
+                return data['return'] if isinstance(data['return'], list) else []
+            if 'data' in data:
+                return data['data'] if isinstance(data['data'], list) else []
+        if isinstance(data, list):
+            return data
+        return []
+    except:
+        return []
+
+
+def _extract_coords(geo_result: Any) -> Optional[str]:
+    """从地理编码结果中提取坐标"""
+    try:
+        if isinstance(geo_result, str):
+            data = json.loads(geo_result)
+        else:
+            data = geo_result
+
+        if isinstance(data, dict) and 'return' in data:
+            if isinstance(data['return'], list) and len(data['return']) > 0:
+                return data['return'][0].get('location')
+        return None
+    except:
+        return None
+
+
+def _parse_driving_result(result: Any) -> Optional[Dict]:
+    """解析自驾路线结果"""
+    try:
+        if isinstance(result, str):
+            data = json.loads(result)
+        else:
+            data = result
+
+        if isinstance(data, dict) and 'return' in data:
+            route = data['return']
+            if isinstance(route, list) and len(route) > 0:
+                route_info = route[0]
+                return {
+                    "distance": route_info.get('distance', ''),
+                    "duration": route_info.get('duration', ''),
+                    "tolls": route_info.get('tolls', 0),
+                    "route": route_info.get('strategy', '')
+                }
+        return None
+    except:
+        return None
+
+
+# ===================== 黄历查询节点 =====================
+
+async def create_lucky_day_node(mcp_manager):
+    """创建黄历查询节点（旧版，已废弃）"""
+    pass
+
+
+async def create_lucky_day_node_v2(mcp_client, state: ChatAgentState) -> Dict[str, Any]:
+    """黄历查询节点 V2 - 使用 MultiServerMCPClient
+
+    Args:
+        mcp_client: MultiServerMCPClient 实例
+        state: 当前状态
+
+    Returns:
+        包含黄历数据的字典
+    """
+    try:
+        start_date = state.get('start_date', '')
+
+        print(f"\n[LuckyDay] 查询黄历: {start_date}")
+
+        if not start_date:
+            print("[LuckyDay] 无出发日期，跳过黄历查询")
+            return {"lucky_day_data": []}
+
+        lucky_results = []
+
+        try:
+            # 获取 bazi 服务器的工具
+            bazi_tools = await mcp_client.get_tools(server_name="bazi Server")
+            print(f"[LuckyDay] 获取到 {len(bazi_tools)} 个 bazi 工具")
+
+            # 找到黄历查询工具
+            calendar_tool = None
+            for tool in bazi_tools:
+                if "calendar" in tool.name.lower() or "chinese" in tool.name.lower():
+                    calendar_tool = tool
+                    break
+
+            if calendar_tool:
+                # 转换为 ISO 格式
+                iso_date = f"{start_date}T12:00:00+08:00"
+                result = await calendar_tool.ainvoke({"solarDatetime": iso_date})
+
+                # 解析结果
+                lucky_info = _parse_lucky_day_result(result, start_date)
+
+                if lucky_info:
+                    lucky_results.append(lucky_info)
+                    print(f"[OK] LuckyDay 查询成功: {lucky_info['summary'][:30]}...")
+                else:
+                    print("[LuckyDay] 解析黄历数据失败")
+
+        except Exception as e:
+            print(f"[LuckyDay] 黄历查询失败: {e}")
+
+        return {"lucky_day_data": lucky_results}
+
+    except Exception as e:
+        print(f"[FAIL] 黄历查询错误: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"lucky_day_data": []}
+
+
+def _parse_lucky_day_result(result: Any, date: str) -> Optional[Dict[str, Any]]:
+    """解析黄历查询结果"""
+    try:
+        if isinstance(result, str):
+            data = json.loads(result)
+        else:
+            data = result
+
+        # 尝试从不同格式中提取数据
+        if isinstance(data, dict):
+            lunar_date = data.get('lunarDate', data.get('lunar_date', ''))
+            gan_zhi = data.get('ganZhi', data.get('gan_zhi', ''))
+            suitable = data.get('yi', data.get('suitable', []))
+            avoid = data.get('ji', data.get('avoid', []))
+        else:
+            return None
+
+        # 确保是列表格式
+        if isinstance(suitable, str):
+            suitable = [s.strip() for s in suitable.split('、') if s.strip()]
+        if isinstance(avoid, str):
+            avoid = [a.strip() for a in avoid.split('、') if a.strip()]
+
+        # 生成摘要
+        suitable_str = '、'.join(suitable[:5]) if suitable else '无'
+        avoid_str = '、'.join(avoid[:5]) if avoid else '无'
+
+        # 检查是否适合出行
+        travel_keywords = ['出行', '旅游', '远行']
+        is_suitable_for_travel = any(kw in str(suitable) for kw in travel_keywords)
+        is_avoid_travel = any(kw in str(avoid) for kw in travel_keywords)
+
+        if is_suitable_for_travel:
+            summary = f"宜出行。农历{lunar_date}，{gan_zhi}。宜：{suitable_str}"
+        elif is_avoid_travel:
+            summary = f"忌出行，建议另选吉日。农历{lunar_date}，{gan_zhi}。忌：{avoid_str}"
+        else:
+            summary = f"农历{lunar_date}，{gan_zhi}。宜：{suitable_str}；忌：{avoid_str}"
+
+        return {
+            "date": date,
+            "lunar_date": lunar_date,
+            "gan_zhi": gan_zhi,
+            "suitable": suitable,
+            "avoid": avoid,
+            "summary": summary
+        }
+    except Exception as e:
+        print(f"[LuckyDay] 解析错误: {e}")
+        return None
