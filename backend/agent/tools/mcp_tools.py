@@ -11,7 +11,6 @@ from contextlib import AsyncExitStack
 from datetime import datetime
 
 from backend.config.settings import settings
-from backend.agent.tools.tool_registry import AVAILABLE_TOOLS, ToolDefinition
 
 
 class MCPToolManager:
@@ -362,21 +361,6 @@ async def query_weather(
         return json.loads(result) if isinstance(result, str) else result
     except Exception as e:
         print(f"[Weather] 查询失败: {e}")
-        return None
-
-
-async def query_lucky_day(
-    manager: MCPToolManager,
-    date: str
-) -> Optional[Dict[str, Any]]:
-    """查询黄历"""
-    try:
-        # 转换为 ISO 格式
-        iso_date = f"{date}T12:00:00+08:00"
-        result = await manager.call_tool("bazi Server", "getChineseCalendar", solarDatetime=iso_date)
-        return json.loads(result) if isinstance(result, str) else result
-    except Exception as e:
-        print(f"[LuckyDay] 查询失败: {e}")
         return None
 
 

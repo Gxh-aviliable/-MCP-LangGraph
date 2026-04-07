@@ -12,20 +12,12 @@ class Settings(BaseSettings):
     """应用配置"""
 
     # === 模型 API Keys ===
-    deepseek_api_key: Optional[str] = None      # DeepSeek API (R1推理模型)
-    dashscope_api_key: Optional[str] = None     # 阿里云DashScope (Qwen3 + Embedding)
+    dashscope_api_key: Optional[str] = None     # 阿里云DashScope (Qwen3)
     amap_maps_api_key: Optional[str] = None     # 高德地图 API
 
     # === 模型选择 ===
-    primary_model: str = "qwen-plus"            # 主模型(日常决策)
-    reasoning_model: str = "deepseek-reasoner"  # 推理模型(复杂场景)
+    primary_model: str = "qwen-plus"            # 主模型
     llm_temperature: float = 0.7                # 模型温度
-
-    # === RAG 配置 ===
-    chroma_persist_dir: str = "./data/travel_vectordb"
-    rag_chunk_size: int = 500
-    rag_chunk_overlap: int = 100
-    rag_top_k: int = 5
 
     # === MCP 配置 ===
     mcp_config_path: str = "backend/config/mcp_config.json"
@@ -51,6 +43,7 @@ class Settings(BaseSettings):
         env_file = str(ENV_FILE)
         env_file_encoding = "utf-8"
         case_sensitive = False
+        extra = "ignore"  # 忽略 .env 中未定义的字段
 
 
 settings = Settings()

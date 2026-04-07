@@ -9,18 +9,12 @@
         {
             "name": "12306 Server",
             "description": "12306火车票服务 - 车次查询、票价查询、站点查询",
-            "type": "streamable_http",
+            "transport": "streamable_http",
             "url": "https://mcp.api-inference.modelscope.net/421163e7fc114a/mcp",
             "headers": {
                 "Authorization": "Bearer ms-452d70de-4e52-4970-842c-54395dc3fdc5"
             },
             "enabled": true
-        },
-        {
-            "name": "bazi Server",
-            "description": "八字黄历服务 - 农历查询、黄历宜忌、吉日查询",
-            "url": "https://mcp.api-inference.modelscope.net/d5b127c9d4cf48/sse",
-            "enabled": false
         },
         {
             "name": "flight Server",
@@ -31,6 +25,6 @@
     ],
     "agent": {
         "name": "TravelPlannerAssistant",
-        "instructions": "你是一名专业的旅行规划智能助手。你可以帮助用户通过以下工具进行旅游规划：1) 12306查询 - 查询火车票信息；2) 高德地图 - 路线规划、酒店搜索、天气预报；3) 黄历查询 - 查询出行吉日。请根据用户需求调用相应工具，并生成详细的旅行方案。"
+        "instructions": "你是一名专业的旅行规划智能助手。你可以帮助用户通过以下工具进行旅游规划：1) 12306查询 - 查询火车票信息；2) 高德地图 - 路线规划、酒店搜索、天气预报。请根据用户需求调用相应工具，并生成详细的旅行方案。"
     }
 }

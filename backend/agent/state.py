@@ -24,7 +24,6 @@ class ChatAgentState(TypedDict):
     weather_data: Annotated[List[Dict[str, Any]], operator.add]        # 天气数据
     hotels_data: Annotated[List[Dict[str, Any]], operator.add]         # 酒店数据
     transport_data: Annotated[List[Dict[str, Any]], operator.add]      # 交通数据（火车票/自驾）
-    lucky_day_data: Annotated[List[Dict[str, Any]], operator.add]      # 黄历数据
 
     # ==================== 对话相关 ====================
     messages: Annotated[List[Dict[str, str]], operator.add]  # 对话历史
@@ -82,7 +81,6 @@ def create_initial_state(request=None) -> Dict[str, Any]:
             "weather_data": [],
             "hotels_data": [],
             "transport_data": [],
-            "lucky_day_data": [],
             # 对话相关
             "messages": [],
             "user_feedback": None,
@@ -122,7 +120,6 @@ def create_initial_state(request=None) -> Dict[str, Any]:
             "weather_data": [],
             "hotels_data": [],
             "transport_data": [],
-            "lucky_day_data": [],
             # 对话相关
             "messages": [],
             "user_feedback": None,

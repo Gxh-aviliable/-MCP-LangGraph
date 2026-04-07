@@ -14,26 +14,6 @@
       </p>
     </div>
 
-    <!-- 黄历信息 -->
-    <div v-if="plan.lucky_day_info" class="lucky-day-section">
-      <div class="section-title">🏮 出行黄历</div>
-      <div class="lucky-day-content">
-        <div class="lunar-date">{{ plan.lucky_day_info.lunar_date || plan.lucky_day_info.date }}</div>
-        <div class="suitable">
-          <span class="label">宜：</span>
-          <span class="tag suitable-tag" v-for="item in plan.lucky_day_info.suitable?.slice(0, 5)" :key="item">
-            {{ item }}
-          </span>
-        </div>
-        <div class="avoid" v-if="plan.lucky_day_info.avoid?.length">
-          <span class="label">忌：</span>
-          <span class="tag avoid-tag" v-for="item in plan.lucky_day_info.avoid?.slice(0, 3)" :key="item">
-            {{ item }}
-          </span>
-        </div>
-      </div>
-    </div>
-
     <!-- 天气信息 -->
     <div v-if="plan.weather_info?.length" class="weather-section">
       <div class="section-title">☀️ 天气预报</div>
@@ -272,54 +252,6 @@ async function exportToPdf() {
   margin-bottom: 8px;
   padding-bottom: 4px;
   border-bottom: 1px solid #eee;
-}
-
-/* 黄历样式 */
-.lucky-day-section {
-  padding: 12px 16px;
-  background: #fff9e6;
-  border-bottom: 1px solid #eee;
-}
-
-.lucky-day-content {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
-.lunar-date {
-  font-size: 14px;
-  font-weight: 600;
-  color: #d4380d;
-}
-
-.suitable, .avoid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-}
-
-.label {
-  font-size: 12px;
-  color: #666;
-}
-
-.tag {
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 11px;
-}
-
-.suitable-tag {
-  background: #f6ffed;
-  color: #52c41a;
-}
-
-.avoid-tag {
-  background: #fff2f0;
-  color: #ff4d4f;
 }
 
 /* 天气样式 */

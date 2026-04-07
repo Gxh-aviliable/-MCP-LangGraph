@@ -1,9 +1,9 @@
-"""智能查询分流模块
+"""智能查询分析模块
 
-根据用户查询的复杂度，决定使用哪个模型处理：
-- simple: 简单查询，Qwen3 主导
-- complex: 复杂查询（预算紧张、特殊需求），R1 主导
-- multi_destination: 多目的地，R1 主导
+分析用户查询的场景类型：
+- simple: 简单查询
+- complex: 复杂查询（预算紧张、特殊需求）
+- multi_destination: 多目的地
 """
 import json
 import re
@@ -30,7 +30,7 @@ async def analyze_query_complexity(
     llm,
     collected_info: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """分析查询复杂度，决定使用哪个模型
+    """分析查询复杂度
 
     Args:
         user_query: 用户查询文本
@@ -40,8 +40,7 @@ async def analyze_query_complexity(
     Returns:
         {
             "scenario_type": "simple" | "complex" | "multi_destination",
-            "needs_r1": bool,
-            "extraction": {...},  # 提取的信息
+            "extraction": {...},
             "reason": "原因说明"
         }
     """
@@ -51,13 +50,13 @@ async def analyze_query_complexity(
     # 构建提取 prompt
     extraction_prompt = f"""You are a travel planning assistant. Today's date is {today}.
 
-Your task: Extract key information from the user query and determine if it needs deep analysis.
+Your task: Extract key information from the user query and determine if it needs special attention.
 
 RULES:
 - Output ONLY valid JSON. NO explanations, NO markdown code blocks.
 - Date conversion: "今天"/"today" = {today}, "明天"/"tomorrow" = +1 day, etc.
 - Use Chinese for city names.
-- Set "needs_deep_analysis" to true if:
+- Set "needs_special_attention" to true if:
   * Complex multi-city routes (e.g., "A和B", "A再去B")
   * Budget optimization needed (tight budget with many requirements)
   * Multiple conflicting constraints (e.g., elderly + children, limited time + many places)
@@ -71,7 +70,7 @@ Output this exact JSON structure:
   "budget": 0,
   "travel_date": "YYYY-MM-DD",
   "preferences": ["preference1"],
-  "needs_deep_analysis": false,
+  "needs_special_attention": false,
   "has_special_needs": false
 }}
 
@@ -101,7 +100,7 @@ User query: {user_query}
             "budget": 0,
             "travel_date": "",
             "preferences": [],
-            "needs_deep_analysis": False,
+            "needs_special_attention": False,
             "has_special_needs": False
         }
 
@@ -111,19 +110,16 @@ User query: {user_query}
     # 确定场景类型
     if multi_dest_info.get('is_multi_destination', False):
         scenario_type = 'multi_destination'
-        needs_r1 = True
         reason = f"多目的地场景: {multi_dest_info.get('detection_method')}"
         print(f"[Router] 检测到多目的地: {reason}")
 
-    elif extraction.get('needs_deep_analysis', False):
+    elif extraction.get('needs_special_attention', False):
         scenario_type = 'complex'
-        needs_r1 = True
-        reason = "需要深度分析(预算/约束复杂)"
+        reason = "需要特别关注(预算/约束复杂)"
         print(f"[Router] 检测到复杂场景: {reason}")
 
     elif extraction.get('has_special_needs', False):
         scenario_type = 'complex'
-        needs_r1 = True
         reason = "包含特殊需求(老人/儿童等)"
         print(f"[Router] 检测到特殊需求: {reason}")
 
@@ -131,16 +127,13 @@ User query: {user_query}
         # 检查是否有特殊需求关键词
         if any(kw in user_query for kw in SPECIAL_NEEDS_KEYWORDS):
             scenario_type = 'complex'
-            needs_r1 = True
             reason = "包含特殊需求关键词"
         else:
             scenario_type = 'simple'
-            needs_r1 = False
-            reason = "简单场景，Qwen3主导"
+            reason = "简单场景"
 
     return {
         "scenario_type": scenario_type,
-        "needs_r1": needs_r1,
         "extraction": extraction,
         "multi_dest_info": multi_dest_info,
         "reason": reason

@@ -92,17 +92,6 @@ class TransportOption(BaseModel):
     details: dict = Field(default_factory=dict, description="详细信息")
 
 
-class LuckyDayInfo(BaseModel):
-    """黄历信息"""
-    date: str = Field(..., description="日期")
-    lunar_date: str = Field(default="", description="农历日期")
-    gan_zhi: str = Field(default="", description="干支")
-    suitable: List[str] = Field(default_factory=list, description="宜")
-    avoid: List[str] = Field(default_factory=list, description="忌")
-    travel_suitable: bool = Field(default=True, description="是否适合出行")
-    summary: str = Field(default="", description="宜忌摘要")
-
-
 class RecommendedTransport(BaseModel):
     """推荐的交通方案"""
     type: str = Field(..., description="交通类型")
@@ -120,7 +109,6 @@ class TripPlan(BaseModel):
     recommended_transport: Optional[RecommendedTransport] = Field(default=None, description="推荐的交通方案")
     days: List[DayPlan] = Field(..., description="每日行程")
     weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
-    lucky_day_info: Optional[LuckyDayInfo] = Field(default=None, description="黄历信息")
     overall_suggestions: str = Field(..., description="总体建议")
     budget: Optional[Budget] = Field(default=None, description="预算信息")
 

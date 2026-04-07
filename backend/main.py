@@ -143,6 +143,17 @@ async def startup_event():
     print(f"[Startup] CORS 允许的来源: {ALLOWED_ORIGINS}")
     print(f"[Startup] 会话过期时间: {session_manager._expire_seconds} 秒")
 
+    # 预热：提前初始化一个 session，避免首次请求卡顿
+    print("[Startup] 预热 MCP 连接...")
+    try:
+        warmup_session = ChatSession()
+        await asyncio.wait_for(warmup_session.initialize(), timeout=60.0)
+        print("[Startup] MCP 预热成功!")
+    except asyncio.TimeoutError:
+        print("[Startup] MCP 预热超时（60秒），将在首次请求时初始化")
+    except Exception as e:
+        print(f"[Startup] MCP 预热失败: {e}")
+
 
 # ===================== API 路由 =====================
 

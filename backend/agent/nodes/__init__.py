@@ -20,12 +20,8 @@ from .nodes import (
     response_generator_node,
     confirm_check_node,
     stage_router_node,
-    # 新增节点
-    create_transport_node,
-    create_lucky_day_node,
-    create_transport_node_v2,
+    # 当前使用的节点
     create_transport_node_v3,
-    create_lucky_day_node_v2,
 )
 
 __all__ = [
@@ -46,10 +42,6 @@ __all__ = [
     'response_generator_node',
     'confirm_check_node',
     'stage_router_node',
-    # 新增节点
-    'create_transport_node',
-    'create_lucky_day_node',
-    'create_transport_node_v2',
+    # 当前使用的节点
     'create_transport_node_v3',
-    'create_lucky_day_node_v2',
 ]

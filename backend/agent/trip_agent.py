@@ -2,10 +2,6 @@
 
 支持对话式交互，用户可以通过自然对话描述需求
 
-支持双模型协作：
-- Qwen3: 处理日常简单查询
-- DeepSeek R1: 处理复杂场景（多目的地、预算优化、特殊需求）
-
 使用方式:
     from backend.agent import ChatSession
 
@@ -42,10 +38,8 @@ from backend.agent.nodes import (
     confirm_check_node,
     stage_router_node,
     create_transport_node_v3,
-    create_lucky_day_node_v2,
 )
 from backend.agent.router import analyze_query_complexity, get_scenario_description
-from backend.agent.tools.r1_tool import get_r1_instance
 from backend.model import TripPlan, TripRequest
 from backend.config.settings import settings
 
@@ -59,7 +53,6 @@ CONFIRM_KEYWORDS = settings.confirm_keywords
 if settings.debug:
     os.environ["LANGCHAIN_DEBUG"] = "true"
     print(f"[Config] 主模型: {settings.primary_model}")
-    print(f"[Config] 推理模型: {settings.reasoning_model}")
 
 
 # ===================== 对话式 Agent 系统 =====================
@@ -70,7 +63,6 @@ class ChatAgentSystem:
     支持:
     - 对话收集需求
     - 自动分析信息完整性
-    - 双模型协作（Qwen3 + DeepSeek R1）
     - 生成行程
     - 多轮调整
     """
@@ -85,9 +77,6 @@ class ChatAgentSystem:
             temperature=settings.llm_temperature
         )
 
-        # DeepSeek R1 - 推理模型（复杂场景，通过 r1_tool 调用）
-        self.r1_analyzer = get_r1_instance()
-
         self.amap_key = settings.amap_maps_api_key
         self.client = None
         self.tools = None
@@ -97,8 +86,12 @@ class ChatAgentSystem:
 
     async def initialize(self):
         """初始化 MCP 工具和 Agent"""
+        print("[Init] 开始初始化 ChatAgentSystem...")
+
         if not self.amap_key:
             raise ValueError("AMAP_MAPS_API_KEY 未设置")
+
+        print("[Init] 步骤1: 读取 MCP 配置文件...")
 
         # === 读取 MCP 配置文件 ===
         import json
@@ -112,8 +105,11 @@ class ChatAgentSystem:
                 for server in mcp_config.get("mcp_servers", []):
                     if server.get("enabled") and server.get("url") and not server["url"].startswith("${"):
                         mcp_servers_config[server["name"]] = server
+        print(f"[Init] 配置文件读取完成，可选服务器: {list(mcp_servers_config.keys())}")
 
         # === 第一步：初始化高德地图 MCP (stdio 方式) - 必须成功 ===
+        print("[Init] 步骤2: 初始化高德地图 MCP (uvx amap-mcp-server)...")
+
         server_config = {
             "amap": {
                 "command": "uvx",
@@ -127,29 +123,38 @@ class ChatAgentSystem:
         }
 
         try:
+            print("[MCP] 正在初始化高德地图工具...")
             self.client = MultiServerMCPClient(server_config)
-            self.tools = await self.client.get_tools()
+            self.tools = await asyncio.wait_for(
+                self.client.get_tools(),
+                timeout=30.0  # 30秒超时
+            )
 
             if not self.tools:
                 raise ValueError("未能加载高德地图工具")
 
             tool_names = [t.name for t in self.tools]
-            print(f"[OK] 高德地图工具加载成功 ({len(tool_names)} 个)")
+            print(f"[OK] 高德地图工具加载成功 ({len(tool_names)} 个): {tool_names}")
 
+        except asyncio.TimeoutError:
+            print(f"[FAIL] 高德地图 MCP 初始化超时（30秒）")
+            raise TimeoutError("高德地图 MCP 初始化超时，请检查 uvx 是否正确安装")
         except Exception as e:
             print(f"[FAIL] 高德地图 MCP 初始化失败: {str(e)}")
             raise
+
+        print("[Init] 步骤3: 连接可选 MCP 服务器...")
 
         # === 第二步：尝试添加 SSE MCP 服务器 - 可选 ===
         for name, server in mcp_servers_config.items():
             url = server.get("url", "")
             if url and not url.startswith("${"):
-                print(f"[MCP] 尝试连接 SSE 服务器: {name}")
+                print(f"[MCP] 尝试连接服务器: {name}, URL: {url}")
                 try:
-                    # 创建新的客户端配置，包含已有的和新的服务器
-                    new_config = dict(self.client.connections)
-                    # 从配置文件读取 transport 类型，支持 sse 和 streamable_http
-                    transport_type = server.get("type", "sse")
+                    # 创建新的客户端配置
+                    # 注意：不能直接复制 self.client.connections，需要创建全新配置
+                    transport_type = server.get("transport", "sse")
+
                     server_config = {
                         "url": url,
                         "transport": transport_type
@@ -158,21 +163,35 @@ class ChatAgentSystem:
                     if server.get("headers"):
                         server_config["headers"] = server["headers"]
 
-                    new_config[name] = server_config
+                    # 创建独立的客户端连接这个服务器
+                    single_server_config = {name: server_config}
 
-                    new_client = MultiServerMCPClient(new_config)
-                    new_tools = await new_client.get_tools(server_name=name)
+                    print(f"[MCP] 配置: transport={transport_type}")
+
+                    single_client = MultiServerMCPClient(single_server_config)
+                    # 添加超时保护
+                    new_tools = await asyncio.wait_for(
+                        single_client.get_tools(),
+                        timeout=20.0
+                    )
 
                     if new_tools:
-                        # 成功获取工具，更新客户端
-                        self.client = new_client
+                        # 成功获取工具，合并到主客户端
                         self.tools.extend(new_tools)
-                        print(f"[OK] SSE 服务器 {name} 连接成功，获取 {len(new_tools)} 个工具")
+                        # 更新客户端引用（后续工具调用会使用）
+                        if not hasattr(self, '_extra_clients'):
+                            self._extra_clients = {}
+                        self._extra_clients[name] = single_client
+                        print(f"[OK] 服务器 {name} 连接成功，获取 {len(new_tools)} 个工具: {[t.name for t in new_tools]}")
                     else:
-                        print(f"[WARN] SSE 服务器 {name} 未返回工具")
+                        print(f"[WARN] 服务器 {name} 未返回工具")
 
+                except asyncio.TimeoutError:
+                    print(f"[WARN] 服务器 {name} 连接超时（20秒），跳过")
                 except Exception as e:
-                    print(f"[WARN] SSE 服务器 {name} 连接失败: {str(e)[:100]}")
+                    import traceback
+                    print(f"[WARN] 服务器 {name} 连接失败: {str(e)[:200]}")
+                    traceback.print_exc()
                     # 继续执行，不影响其他功能
 
         # 打印最终加载的工具
@@ -180,8 +199,11 @@ class ChatAgentSystem:
         print(f"[OK] 总共加载 {len(final_tool_names)} 个工具")
 
         # 创建流程图
+        print("[Init] 步骤4: 创建 LangGraph 流程图...")
         self.chat_graph = self._create_chat_graph()
         self.plan_graph = self._create_plan_graph()
+
+        print("[Init] ✅ ChatAgentSystem 初始化完成!")
 
     def _create_chat_graph(self) -> StateGraph:
         """构建对话流程图"""
@@ -210,7 +232,7 @@ class ChatAgentSystem:
     def _create_plan_graph(self) -> StateGraph:
         """构建规划流程图（生成行程）
 
-        流程: 景点专家 → 天气专家 → 交通专家 → 黄历专家 → 酒店专家 → 规划节点
+        流程: 景点专家 → 天气专家 → 交通专家 → 酒店专家 → 规划节点
         """
         workflow = StateGraph(ChatAgentState)
 
@@ -231,14 +253,8 @@ class ChatAgentSystem:
         # === 交通专家节点 (V3: 使用 LLM + 工具调用) ===
         workflow.add_node(
             "transport_expert",
-            create_transport_node_v3(self.llm, self.client)
+            create_transport_node_v3(self.llm, self.tools)
         )
-
-        # === 黄历专家节点 ===
-        async def lucky_day_node(state):
-            return await create_lucky_day_node_v2(self.client, state)
-
-        workflow.add_node("lucky_day_expert", lucky_day_node)
 
         # === 规划节点 ===
         async def plan_node(state):
@@ -247,12 +263,11 @@ class ChatAgentSystem:
         workflow.add_node("plan_trip", plan_node)
 
         # === 执行流程 ===
-        # 景点 → 天气 → 交通 → 黄历 → 酒店 → 规划
+        # 景点 → 天气 → 交通 → 酒店 → 规划
         workflow.set_entry_point("attraction_expert")
         workflow.add_edge("attraction_expert", "weather_expert")
         workflow.add_edge("weather_expert", "transport_expert")
-        workflow.add_edge("transport_expert", "lucky_day_expert")
-        workflow.add_edge("lucky_day_expert", "hotel_expert")
+        workflow.add_edge("transport_expert", "hotel_expert")
         workflow.add_edge("hotel_expert", "plan_trip")
         workflow.add_edge("plan_trip", END)
 
@@ -285,7 +300,7 @@ class ChatAgentSystem:
         user_query: str,
         collected_info: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """分析查询复杂度，决定使用哪个模型
+        """分析查询复杂度
 
         Args:
             user_query: 用户查询
@@ -294,28 +309,11 @@ class ChatAgentSystem:
         Returns:
             {
                 "scenario_type": "simple" | "complex" | "multi_destination",
-                "needs_r1": bool,
                 "extraction": {...},
                 "reason": "原因说明"
             }
         """
         return await analyze_query_complexity(user_query, self.llm, collected_info)
-
-    async def deep_analyze_with_r1(
-        self,
-        problem: str,
-        context: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """使用 R1 进行深度分析
-
-        Args:
-            problem: 需要分析的问题
-            context: 上下文信息
-
-        Returns:
-            分析结果
-        """
-        return await self.r1_analyzer.analyze(problem, context)
 
 
 # ===================== 对话会话管理 =====================
@@ -434,7 +432,6 @@ class ChatSession:
             "weather_data": [],
             "hotels_data": [],
             "transport_data": [],
-            "lucky_day_data": [],
             # 保持其他状态
             "conversation_stage": "planning",
             "collected_info": collected_info,
