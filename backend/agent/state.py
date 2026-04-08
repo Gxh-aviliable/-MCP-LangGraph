@@ -6,6 +6,19 @@ import operator
 from typing import Annotated, List, TypedDict, Dict, Any, Optional
 
 
+# ==================== ReAct 思考链 ====================
+
+class AgentThought(TypedDict):
+    """Agent 的单步思考记录 - ReAct 架构核心"""
+    step: int                    # 第几步
+    thought: str                 # 思考内容（分析当前状态）
+    action: str                  # 采取的行动
+    action_reason: str           # 选择这个行动的原因
+    observation: str             # 观察到的结果
+    reflection: str              # 反思（这个结果够好吗？）
+    confidence: float            # 对当前行动的信心 (0-1)
+
+
 class ChatAgentState(TypedDict):
     """多轮对话状态 - 支持持续性交互"""
 
@@ -34,15 +47,38 @@ class ChatAgentState(TypedDict):
     details: Optional[str]            # 详细说明
 
     # ==================== 需求收集状态（新增） ====================
-    conversation_stage: str           # 对话阶段: greeting/collecting/confirming/planning/refining/done
+    conversation_stage: str           # 对话阶段: greeting/collecting/optional_collecting/confirming/planning/refining/done
     collected_info: Dict[str, Any]    # 已收集的旅行信息
     missing_fields: List[str]         # 缺失的必要字段
     ready_to_plan: bool               # 是否可以开始规划
     user_confirmed: bool              # 用户是否确认生成
 
+    # ==================== 可选参数收集 ====================
+    optional_collected: bool          # 可选参数是否已完成（跳过或达到轮次上限）
+    optional_skipped: bool            # 用户是否明确跳过可选参数
+    optional_round: int               # 当前引导轮次（0表示未开始）
+
     # ==================== 流程控制 ====================
     iteration_count: int              # 迭代次数
     is_satisfied: bool                # 用户是否满意
+
+    # ==================== Agent 智能决策 ====================
+    tool_decisions: Optional[Dict[str, bool]]   # 工具选择决策: {"attraction": True, "weather": True, ...}
+    tool_decision_reason: Optional[str]         # 决策原因说明
+    special_instructions: Optional[Dict[str, Any]]  # 用户特别说明: {"skip_attraction": True, "reason": "..."}
+
+    # ==================== 反思与重规划 ====================
+    need_replan: Optional[bool]                 # 是否需要重新规划
+    replan_reason: Optional[str]                # 重规划原因
+    replan_attempts: Optional[int]              # 重规划尝试次数
+    plan_metrics: Optional[Dict[str, Any]]      # 行程评估指标
+
+    # ==================== ReAct 思考链（核心智能） ====================
+    thoughts: List[Dict[str, Any]]                               # 思考历史（不累加，每次替换）
+    current_goal: str                                          # 当前目标
+    next_action: str                                           # 下一步行动
+    should_continue: bool                                      # 是否继续推理
+    quality_score: float                                       # 当前质量分数
 
     # ==================== 最终结果 ====================
     final_plan: Optional[Dict[str, Any]]                    # 最终行程
@@ -94,9 +130,28 @@ def create_initial_state(request=None) -> Dict[str, Any]:
             "missing_fields": [],
             "ready_to_plan": True,
             "user_confirmed": True,
+            # 可选参数收集
+            "optional_collected": True,  # 表单模式直接跳过可选参数引导
+            "optional_skipped": True,
+            "optional_round": 0,
             # 流程控制
             "iteration_count": 0,
             "is_satisfied": False,
+            # Agent 智能决策
+            "tool_decisions": None,
+            "tool_decision_reason": None,
+            "special_instructions": None,
+            # 反思与重规划
+            "need_replan": None,
+            "replan_reason": None,
+            "replan_attempts": 0,
+            "plan_metrics": None,
+            # ReAct 思考链
+            "thoughts": [],
+            "current_goal": "",
+            "next_action": "",
+            "should_continue": True,
+            "quality_score": 0.0,
             # 最终结果
             "final_plan": None,
             "context": [],
@@ -133,9 +188,28 @@ def create_initial_state(request=None) -> Dict[str, Any]:
             "missing_fields": REQUIRED_FIELDS.copy(),
             "ready_to_plan": False,
             "user_confirmed": False,
+            # 可选参数收集
+            "optional_collected": False,  # 对话模式需要引导可选参数
+            "optional_skipped": False,
+            "optional_round": 0,
             # 流程控制
             "iteration_count": 0,
             "is_satisfied": False,
+            # Agent 智能决策
+            "tool_decisions": None,
+            "tool_decision_reason": None,
+            "special_instructions": None,
+            # 反思与重规划
+            "need_replan": None,
+            "replan_reason": None,
+            "replan_attempts": 0,
+            "plan_metrics": None,
+            # ReAct 思考链
+            "thoughts": [],
+            "current_goal": "",
+            "next_action": "",
+            "should_continue": True,
+            "quality_score": 0.0,
             # 最终结果
             "final_plan": None,
             "context": [],

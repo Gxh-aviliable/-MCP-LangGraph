@@ -1,6 +1,6 @@
 """数据模型定义"""
 from pydantic import BaseModel,Field,field_validator
-from typing import Optional,List
+from typing import Optional,List,Dict,Any
 
 
 """"=======================响应模型========================"""
@@ -43,12 +43,12 @@ class Hotel(BaseModel):
 
 class Budget(BaseModel):
     """预算信息"""
-    transport: int = Field(default=0, description="交通费用")
-    total_attractions: int = Field(default=0,description="景点门票总费用")
-    total_hotels: int = Field(default=0,description="酒店总费用")
-    total_meals: int = Field(default=0,description="餐饮总费用")
-    total_transportation: int = Field(default=0,description="交通总费用")
-    total: int = Field(default=0,description="总费用")
+    transport: float = Field(default=0.0, description="交通费用")
+    total_attractions: float = Field(default=0.0, description="景点门票总费用")
+    total_hotels: float = Field(default=0.0, description="酒店总费用")
+    total_meals: float = Field(default=0.0, description="餐饮总费用")
+    total_transportation: float = Field(default=0.0, description="交通总费用")
+    total: float = Field(default=0.0, description="总费用")
 
 class DayPlan(BaseModel):
     """单日行程"""
@@ -88,7 +88,7 @@ class TransportOption(BaseModel):
     type: str = Field(..., description="交通类型: train/driving/flight")
     name: str = Field(..., description="方案名称")
     duration: str = Field(default="", description="耗时")
-    cost: int = Field(default=0, description="费用(元)")
+    cost: float = Field(default=0.0, description="费用(元)")  # 改为 float，票价可能是 18.5
     details: dict = Field(default_factory=dict, description="详细信息")
 
 
@@ -143,6 +143,7 @@ class ChatRequest(BaseModel):
     """对话请求 - 用于聊天式交互"""
     session_id: Optional[str] = Field(default=None, description="会话ID，首次可为空")
     message: str = Field(..., description="用户消息")
+    agent_mode: Optional[str] = Field(default="smart", description="Agent模式: smart(智能规划)/react(ReAct推理)")
 
 
 class CollectedInfo(BaseModel):
@@ -162,6 +163,6 @@ class ChatResponse(BaseModel):
     session_id: str = Field(..., description="会话ID")
     reply: str = Field(..., description="机器人回复")
     stage: str = Field(..., description="对话阶段: greeting/collecting/confirming/planning/refining/done")
-    collected_info: Optional[CollectedInfo] = Field(default=None, description="已收集信息")
+    collected_info: Optional[Dict[str, Any]] = Field(default=None, description="已收集信息")
     missing_fields: List[str] = Field(default_factory=list, description="缺失字段")
     plan: Optional[dict] = Field(default=None, description="行程计划(生成后返回)")

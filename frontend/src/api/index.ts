@@ -22,6 +22,7 @@ export interface FeedbackRequest {
 export interface ChatRequest {
   session_id?: string
   message: string
+  agent_mode?: 'smart' | 'react'  // Agent模式：smart(智能规划)/react(ReAct推理)
 }
 
 export interface CollectedInfo {
@@ -49,6 +50,16 @@ export interface Message {
   plan?: any  // 如果这条消息包含行程
 }
 
+// SSE 事件回调
+export interface StreamCallbacks {
+  onSession?: (sessionId: string) => void
+  onMessage?: (content: string) => void
+  onStage?: (stage: string, collectedInfo: CollectedInfo | null, missingFields: string[]) => void
+  onPlan?: (plan: any) => void
+  onError?: (message: string) => void
+  onDone?: () => void
+}
+
 // ===================== API 函数 =====================
 
 export const api = {
@@ -56,6 +67,77 @@ export const api = {
   async chat(request: ChatRequest): Promise<ChatResponse> {
     const response = await axios.post(`${API_BASE}/chat`, request)
     return response.data
+  },
+
+  // 流式对话 API
+  async chatStream(request: ChatRequest, callbacks: StreamCallbacks): Promise<void> {
+    const response = await fetch(`${API_BASE}/chat/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+    })
+
+    if (!response.ok) {
+      callbacks.onError?.(`请求失败: ${response.status}`)
+      return
+    }
+
+    const reader = response.body?.getReader()
+    if (!reader) {
+      callbacks.onError?.('无法获取响应流')
+      return
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+
+        // 解析 SSE 事件
+        const lines = buffer.split('\n\n')
+        buffer = lines.pop() || ''  // 保留不完整的部分
+
+        for (const line of lines) {
+          if (!line.trim()) continue
+
+          const eventMatch = line.match(/^event:\s*(\w+)\ndata:\s*(.+)$/s)
+          if (eventMatch) {
+            const eventType = eventMatch[1]
+            const data = JSON.parse(eventMatch[2])
+
+            switch (eventType) {
+              case 'session':
+                callbacks.onSession?.(data.session_id)
+                break
+              case 'message':
+                callbacks.onMessage?.(data.content)
+                break
+              case 'stage':
+                callbacks.onStage?.(data.stage, data.collected_info, data.missing_fields || [])
+                break
+              case 'plan':
+                callbacks.onPlan?.(data.plan)
+                break
+              case 'error':
+                callbacks.onError?.(data.message)
+                break
+              case 'done':
+                callbacks.onDone?.()
+                break
+            }
+          }
+        }
+      }
+    } catch (error: any) {
+      callbacks.onError?.(error.message || '流式读取错误')
+    }
   },
 
   // 获取会话状态
