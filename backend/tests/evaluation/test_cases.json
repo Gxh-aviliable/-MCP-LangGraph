@@ -1,0 +1,210 @@
+{
+  "test_cases": [
+    {
+      "id": "TC001",
+      "name": "标准北京三日游",
+      "description": "测试标准的旅行规划流程",
+      "input": {
+        "origin": "上海",
+        "city": "北京",
+        "start_date": "2024-04-01",
+        "end_date": "2024-04-03",
+        "interests": ["历史古迹"]
+      },
+      "expected_outputs": {
+        "has_attractions": true,
+        "attraction_count_min": 3,
+        "has_weather": true,
+        "has_transport": true,
+        "has_hotel": true,
+        "budget_total_min": 500
+      },
+      "quality_threshold": 0.6
+    },
+    {
+      "id": "TC002",
+      "name": "跳过景点查询",
+      "description": "用户表示不看景点，测试决策跳过",
+      "input": {
+        "origin": "上海",
+        "city": "北京",
+        "start_date": "2024-04-01",
+        "end_date": "2024-04-03",
+        "special_instructions": {
+          "skip_attraction": true,
+          "skip_attraction_reason": "用户已做好攻略"
+        }
+      },
+      "expected_outputs": {
+        "has_attractions": false,
+        "has_weather": true
+      },
+      "decision_accuracy_check": true
+    },
+    {
+      "id": "TC003",
+      "name": "本地游（无交通）",
+      "description": "出发地与目的地相同，应跳过交通",
+      "input": {
+        "origin": "北京",
+        "city": "北京",
+        "start_date": "2024-04-01",
+        "end_date": "2024-04-02"
+      },
+      "expected_outputs": {
+        "has_transport": false
+      },
+      "decision_accuracy_check": true
+    },
+    {
+      "id": "TC004",
+      "name": "已订好酒店和交通",
+      "description": "用户已有安排，跳过相关查询",
+      "input": {
+        "origin": "上海",
+        "city": "北京",
+        "start_date": "2024-04-01",
+        "end_date": "2024-04-03",
+        "special_instructions": {
+          "skip_hotel": true,
+          "skip_hotel_reason": "已订好酒店",
+          "skip_transport": true,
+          "skip_transport_reason": "已买好机票"
+        }
+      },
+      "expected_outputs": {
+        "has_hotel": false,
+        "has_transport": false,
+        "has_attractions": true
+      },
+      "decision_accuracy_check": true
+    },
+    {
+      "id": "TC005",
+      "name": "预算约束测试",
+      "description": "测试预算约束是否生效",
+      "input": {
+        "origin": "上海",
+        "city": "北京",
+        "start_date": "2024-04-01",
+        "end_date": "2024-04-03",
+        "budget_per_day": 300
+      },
+      "expected_outputs": {
+        "budget_deviation_max": 0.3,
+        "budget_accuracy_min": 0.6
+      }
+    }
+  ],
+  "decision_accuracy_cases": [
+    {
+      "id": "DAC001",
+      "user_message": "不看景点，只想去吃美食",
+      "expected_decision": {
+        "skip_attraction": true,
+        "skip_weather": false,
+        "skip_transport": false,
+        "skip_hotel": false
+      },
+      "reason": "用户明确表示不看景点"
+    },
+    {
+      "id": "DAC002",
+      "user_message": "已经订好酒店和机票了",
+      "expected_decision": {
+        "skip_attraction": false,
+        "skip_hotel": true,
+        "skip_transport": true,
+        "skip_weather": false
+      },
+      "reason": "用户已有住宿和交通安排"
+    },
+    {
+      "id": "DAC003",
+      "user_message": "上海本地游",
+      "expected_decision": {
+        "skip_attraction": false,
+        "skip_hotel": true,
+        "skip_transport": true,
+        "skip_weather": false
+      },
+      "reason": "本地游不需要交通和住宿"
+    },
+    {
+      "id": "DAC004",
+      "user_message": "自己开车去",
+      "expected_decision": {
+        "skip_attraction": false,
+        "skip_hotel": false,
+        "skip_transport": true,
+        "skip_weather": false
+      },
+      "reason": "用户自己开车，不需要查询交通"
+    },
+    {
+      "id": "DAC005",
+      "user_message": "当天往返",
+      "expected_decision": {
+        "skip_attraction": false,
+        "skip_hotel": true,
+        "skip_transport": false,
+        "skip_weather": false
+      },
+      "reason": "当天往返不需要住宿"
+    },
+    {
+      "id": "DAC006",
+      "user_message": "住朋友家",
+      "expected_decision": {
+        "skip_attraction": false,
+        "skip_hotel": true,
+        "skip_transport": false,
+        "skip_weather": false
+      },
+      "reason": "用户有住宿安排"
+    },
+    {
+      "id": "DAC007",
+      "user_message": "帮我规划一下行程",
+      "expected_decision": {
+        "skip_attraction": false,
+        "skip_hotel": false,
+        "skip_transport": false,
+        "skip_weather": false
+      },
+      "reason": "标准规划，所有工具都需要"
+    },
+    {
+      "id": "DAC008",
+      "user_message": "已做好攻略",
+      "expected_decision": {
+        "skip_attraction": true,
+        "skip_hotel": false,
+        "skip_transport": false,
+        "skip_weather": false
+      },
+      "reason": "用户已有景点攻略"
+    }
+  ],
+  "conversation_flow_cases": [
+    {
+      "id": "CFC001",
+      "name": "完整对话流程",
+      "steps": [
+        {"user": "", "expected_stage": "greeting", "expected_missing_count": 4},
+        {"user": "我想去北京玩", "expected_stage": "collecting", "expected_collected": {"city": "北京"}},
+        {"user": "从上海出发", "expected_stage": "collecting", "expected_collected": {"origin": "上海"}},
+        {"user": "4月1号开始，玩三天", "expected_stage": "confirming", "expected_missing_count": 0},
+        {"user": "是的，开始规划", "expected_stage": "planning"}
+      ]
+    },
+    {
+      "id": "CFC002",
+      "name": "一次性提供所有信息",
+      "steps": [
+        {"user": "", "expected_stage": "greeting"},
+        {"user": "我想从上海去北京，4月1号出发，玩三天，喜欢历史古迹", "expected_stage": "confirming"}
+      ]
+    }
+  ]
+}
