@@ -107,23 +107,24 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
-import { api, type ChatResponse, type Message, type CollectedInfo } from '../api'
+import { api, type Message, type CollectedInfo } from '../api'
 import PlanCard from './PlanCard.vue'
+
+// localStorage 键名
+const STORAGE_KEY = 'travel_chat_session'
+const INIT_KEY = 'travel_chat_initialized'
 
 // 状态
 const messages = ref<Message[]>([])
 const userInput = ref('')
 const loading = ref(false)
-const streaming = ref(false)  // 流式输出状态
-const streamingContent = ref('')  // 流式输出的临时内容
+const streaming = ref(false)
+const streamingContent = ref('')
 const sessionId = ref<string | null>(null)
 const stage = ref<string>('greeting')
 const collectedInfo = ref<CollectedInfo | null>(null)
 const messagesContainer = ref<HTMLElement | null>(null)
-const agentMode = ref<'smart' | 'react'>('smart')  // Agent 模式
-
-// localStorage 键名
-const STORAGE_KEY = 'travel_chat_session'
+const agentMode = ref<'smart' | 'react'>('smart')
 
 // 快捷回复
 const quickReplies = computed(() => {
@@ -138,57 +139,6 @@ const quickReplies = computed(() => {
   }
   return []
 })
-
-// 加载保存的会话
-async function loadSavedSession() {
-  const saved = localStorage.getItem(STORAGE_KEY)
-  console.log('[loadSavedSession] saved:', saved)
-
-  if (saved) {
-    try {
-      const data = JSON.parse(saved)
-      console.log('[loadSavedSession] parsed data:', data)
-
-      // 检查时间戳是否在24小时内
-      if (data.sessionId && Date.now() - data.timestamp < 24 * 60 * 60 * 1000) {
-        // 先验证会话是否有效
-        try {
-          console.log('[loadSavedSession] checking session:', data.sessionId)
-          const status = await api.getChatStatus(data.sessionId)
-          console.log('[loadSavedSession] status response:', status)
-
-          if (status.success) {
-            // 会话有效，恢复
-            sessionId.value = data.sessionId
-            stage.value = status.stage
-            // 恢复之前选择的模式
-            if (data.agentMode) {
-              agentMode.value = data.agentMode
-            }
-            console.log('[loadSavedSession] session restored, mode:', agentMode.value)
-          } else {
-            // 会话已过期，清除
-            console.log('[loadSavedSession] session expired, clearing')
-            clearSession()
-          }
-        } catch (e) {
-          // 网络错误或其他问题，清除旧会话
-          console.error('[loadSavedSession] error checking session:', e)
-          clearSession()
-        }
-      } else {
-        // 时间过期或无 sessionId，清除
-        console.log('[loadSavedSession] timestamp expired or no sessionId, clearing')
-        clearSession()
-      }
-    } catch (e) {
-      console.error('[loadSavedSession] parse error:', e)
-      clearSession()
-    }
-  } else {
-    console.log('[loadSavedSession] no saved session')
-  }
-}
 
 // 保存会话
 function saveSession() {
@@ -208,7 +158,6 @@ function clearSession() {
   messages.value = []
   stage.value = 'greeting'
   collectedInfo.value = null
-  // 不重置 agentMode，保留用户选择的模式
 }
 
 // 滚动到底部
@@ -220,38 +169,51 @@ function scrollToBottom() {
   })
 }
 
-// 切换模式（会清除当前会话）
-async function switchMode(mode: 'smart' | 'react') {
-  if (agentMode.value === mode) return
-
-  // 如果有进行中的会话，提示用户
-  if (sessionId.value && stage.value !== 'done') {
-    if (!confirm('切换模式将清除当前对话，确定要切换吗？')) {
-      return
-    }
-  }
-
-  agentMode.value = mode
-  console.log('[Mode] 切换到', mode, '模式')
-  await createNewSession()
+// 检查是否已经初始化过（使用 sessionStorage）
+function isAlreadyInitialized(): boolean {
+  return sessionStorage.getItem(INIT_KEY) === 'true'
 }
 
-// 重新开始新会话
-async function startNewSession() {
-  if (sessionId.value && stage.value !== 'done') {
-    if (!confirm('确定要重新开始吗？当前对话将被清除。')) {
-      return
-    }
-  }
-  await createNewSession()
+// 标记已初始化
+function markInitialized() {
+  sessionStorage.setItem(INIT_KEY, 'true')
 }
 
-// 创建新会话（使用流式输出）
-async function createNewSession() {
+// 加载保存的会话（简化版，不自动创建新会话）
+async function loadSavedSession(): Promise<boolean> {
+  const saved = localStorage.getItem(STORAGE_KEY)
+  if (!saved) return false
+
+  try {
+    const data = JSON.parse(saved)
+    if (data.sessionId && Date.now() - data.timestamp < 24 * 60 * 60 * 1000) {
+      // 验证会话是否有效
+      try {
+        const status = await api.getChatStatus(data.sessionId)
+        if (status.success) {
+          sessionId.value = data.sessionId
+          stage.value = status.stage
+          if (data.agentMode) {
+            agentMode.value = data.agentMode
+          }
+          return true
+        }
+      } catch {
+        // 网络错误，忽略
+      }
+    }
+  } catch {
+    // 解析错误
+  }
+
   clearSession()
+  return false
+}
+
+// 创建新会话（获取问候消息）
+async function fetchGreeting() {
   streaming.value = true
   streamingContent.value = ''
-  loading.value = true
 
   try {
     await api.chatStream(
@@ -260,66 +222,85 @@ async function createNewSession() {
         onSession: (sid) => {
           sessionId.value = sid
           saveSession()
-          console.log('[Session] 新会话已创建，模式:', agentMode.value)
         },
         onMessage: (content) => {
           streamingContent.value = content
-          messages.value = [{
-            role: 'assistant',
-            content: content
-          }]
-          scrollToBottom()
+          messages.value = [{ role: 'assistant', content }]
         },
-        onStage: (newStage, collected, missing) => {
+        onStage: (newStage) => {
           stage.value = newStage
         },
         onError: (errorMsg) => {
           streaming.value = false
-          streamingContent.value = ''
           loading.value = false
-          messages.value.push({
+          messages.value = [{
             role: 'assistant',
-            content: '抱歉，创建会话失败，请重试。'
-          })
-          scrollToBottom()
+            content: '您好！我是旅行规划助手，可以帮您规划行程。请告诉我您想去哪里旅行？'
+          }]
         },
         onDone: () => {
           streaming.value = false
           streamingContent.value = ''
           loading.value = false
+          markInitialized()
           scrollToBottom()
         }
       }
     )
   } catch (error) {
-    console.error('[Session] 创建新会话失败:', error)
     streaming.value = false
-    streamingContent.value = ''
     loading.value = false
-    messages.value.push({
+    messages.value = [{
       role: 'assistant',
-      content: '抱歉，创建会话失败，请重试。'
-    })
-    scrollToBottom()
+      content: '您好！我是旅行规划助手，可以帮您规划行程。请告诉我您想去哪里旅行？'
+    }]
+    markInitialized()
   }
 }
 
-// 发送消息（使用流式输出）
+// 切换模式
+async function switchMode(mode: 'smart' | 'react') {
+  if (agentMode.value === mode) return
+
+  if (sessionId.value && stage.value !== 'done') {
+    if (!confirm('切换模式将清除当前对话，确定要切换吗？')) {
+      return
+    }
+  }
+
+  agentMode.value = mode
+  clearSession()
+  sessionStorage.removeItem(INIT_KEY)
+  loading.value = true
+  await fetchGreeting()
+}
+
+// 重新开始
+async function startNewSession() {
+  if (sessionId.value && stage.value !== 'done') {
+    if (!confirm('确定要重新开始吗？当前对话将被清除。')) {
+      return
+    }
+  }
+  clearSession()
+  sessionStorage.removeItem(INIT_KEY)
+  loading.value = true
+  await fetchGreeting()
+}
+
+// 发送消息
 async function sendMessage() {
   const message = userInput.value.trim()
   if (!message || loading.value || streaming.value || stage.value === 'done') return
 
-  // 添加用户消息
   messages.value.push({ role: 'user', content: message })
   userInput.value = ''
   scrollToBottom()
 
-  // 开始流式输出
   streaming.value = true
   streamingContent.value = ''
   loading.value = true
 
-  // 临时消息索引（用于流式更新）
   let tempMessageIndex = -1
 
   try {
@@ -335,27 +316,21 @@ async function sendMessage() {
           saveSession()
         },
         onMessage: (content) => {
-          // 第一次收到消息时，添加临时消息
           if (tempMessageIndex === -1) {
-            messages.value.push({
-              role: 'assistant',
-              content: ''
-            })
+            messages.value.push({ role: 'assistant', content: '' })
             tempMessageIndex = messages.value.length - 1
           }
-          // 更新消息内容
           streamingContent.value = content
           if (tempMessageIndex >= 0) {
             messages.value[tempMessageIndex].content = content
           }
           scrollToBottom()
         },
-        onStage: (newStage, collected, missing) => {
+        onStage: (newStage, collected) => {
           stage.value = newStage
           collectedInfo.value = collected
         },
         onPlan: (plan) => {
-          // 如果有行程，附加到最后一条消息
           if (tempMessageIndex >= 0) {
             messages.value[tempMessageIndex].plan = plan
           }
@@ -363,10 +338,8 @@ async function sendMessage() {
         onError: (errorMsg) => {
           streaming.value = false
           streamingContent.value = ''
-          messages.value.push({
-            role: 'assistant',
-            content: `抱歉，发生了错误：${errorMsg}`
-          })
+          loading.value = false
+          messages.value.push({ role: 'assistant', content: `抱歉，发生了错误：${errorMsg}` })
           scrollToBottom()
         },
         onDone: () => {
@@ -374,107 +347,52 @@ async function sendMessage() {
           streamingContent.value = ''
           loading.value = false
 
-          // 如果完成，清除会话
           if (stage.value === 'done') {
-            setTimeout(() => {
-              clearSession()
-            }, 3000)
+            setTimeout(() => clearSession(), 3000)
           }
           scrollToBottom()
         }
       }
     )
-  } catch (error: any) {
+  } catch {
     streaming.value = false
     streamingContent.value = ''
     loading.value = false
-    messages.value.push({
-      role: 'assistant',
-      content: '网络错误，请检查连接后重试。'
-    })
+    messages.value.push({ role: 'assistant', content: '网络错误，请检查连接后重试。' })
     scrollToBottom()
   }
 }
 
 // 初始化
 onMounted(async () => {
-  console.log('[onMounted] starting initialization...')
+  // 防止重复初始化
+  if (isAlreadyInitialized()) {
+    console.log('[onMounted] 已初始化过，跳过')
+    return
+  }
+
+  console.log('[onMounted] 开始初始化...')
   loading.value = true
 
-  try {
-    await loadSavedSession()
-    console.log('[onMounted] loadSavedSession done, sessionId:', sessionId.value)
+  // 尝试恢复旧会话
+  const hasSession = await loadSavedSession()
 
-    // 如果是新会话，获取问候消息（使用流式输出）
-    if (!sessionId.value) {
-      console.log('[onMounted] fetching greeting via stream...')
-      streaming.value = true
-      streamingContent.value = ''
-
-      await api.chatStream(
-        { message: '', agent_mode: agentMode.value },
-        {
-          onSession: (sid) => {
-            sessionId.value = sid
-            saveSession()
-            console.log('[onMounted] session created:', sid)
-          },
-          onMessage: (content) => {
-            streamingContent.value = content
-            messages.value = [{
-              role: 'assistant',
-              content: content
-            }]
-          },
-          onStage: (newStage) => {
-            stage.value = newStage
-          },
-          onError: (errorMsg) => {
-            console.error('[onMounted] stream error:', errorMsg)
-            streaming.value = false
-            streamingContent.value = ''
-            loading.value = false
-            messages.value.push({
-              role: 'assistant',
-              content: '您好！我是旅行规划助手，可以帮您规划行程。请告诉我您想去哪里旅行？'
-            })
-          },
-          onDone: () => {
-            streaming.value = false
-            streamingContent.value = ''
-            loading.value = false
-            console.log('[onMounted] greeting displayed')
-            scrollToBottom()
-          }
-        }
-      )
-    } else {
-      // 恢复会话时显示提示
-      console.log('[onMounted] restoring session')
-      loading.value = false
-      messages.value.push({
-        role: 'assistant',
-        content: '欢迎回来！请继续告诉我您的旅行需求。'
-      })
-      scrollToBottom()
-    }
-  } catch (error) {
-    console.error('[onMounted] initialization error:', error)
-    streaming.value = false
-    streamingContent.value = ''
+  if (hasSession) {
+    // 有旧会话，显示恢复提示
     loading.value = false
     messages.value.push({
       role: 'assistant',
-      content: '您好！我是旅行规划助手，可以帮您规划行程。请告诉我您想去哪里旅行？'
+      content: '欢迎回来！请继续告诉我您的旅行需求。'
     })
-    clearSession()
+    markInitialized()
     scrollToBottom()
-  } finally {
-    console.log('[onMounted] initialization complete')
+  } else {
+    // 没有旧会话，获取问候消息
+    await fetchGreeting()
   }
 })
 
-// 监听消息变化，滚动到底部
+// 监听消息变化
 watch(messages, scrollToBottom, { deep: true })
 </script>
 
@@ -488,7 +406,6 @@ watch(messages, scrollToBottom, { deep: true })
   background: #fff;
 }
 
-/* 模式切换样式 */
 .mode-switch {
   display: flex;
   align-items: center;
@@ -539,12 +456,6 @@ watch(messages, scrollToBottom, { deep: true })
 .mode-btn.new-session-btn:hover {
   background: #c0392b;
   border-color: #c0392b;
-}
-
-.mode-hint {
-  font-size: 12px;
-  color: #999;
-  margin-left: 8px;
 }
 
 .messages-container {
@@ -628,7 +539,6 @@ watch(messages, scrollToBottom, { deep: true })
   40% { transform: scale(1); opacity: 1; }
 }
 
-/* 流式输出样式 */
 .message-text.streaming {
   position: relative;
 }

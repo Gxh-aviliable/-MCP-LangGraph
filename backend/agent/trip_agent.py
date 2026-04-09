@@ -368,15 +368,19 @@ class ChatSession:
 
     async def start(self) -> Dict[str, Any]:
         """开始会话，返回问候消息"""
+        print(f"[Start] 会话 {self.thread_id[:8]} 开始...")
         await self.initialize()
 
         if not self._has_sent_greeting:
             from backend.prompts import GREETING_MESSAGE
             self._has_sent_greeting = True
+            print(f"[Start] 准备初始化状态...")
 
             # 初始化状态
             initial_state = create_initial_state()
+            print(f"[Start] 调用 aupdate_state...")
             await self.chat_graph.aupdate_state(self.config, initial_state)
+            print(f"[Start] aupdate_state 完成")
 
             return {
                 "reply": GREETING_MESSAGE,
@@ -387,6 +391,7 @@ class ChatSession:
             }
 
         # 如果已发送问候，返回当前状态
+        print(f"[Start] 已发送问候，获取当前状态...")
         current_state = await self.chat_graph.aget_state(self.config)
         return self._build_response(current_state.values)
 

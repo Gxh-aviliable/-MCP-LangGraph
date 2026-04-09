@@ -14,7 +14,6 @@ from typing import Dict, Optional, Union, AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from sse_starlette.sse import EventSourceResponse
 
 from backend.agent import ChatSession, TripChatSession, SharedResourceManager
 from backend.model import TripRequest, FeedbackRequest, ChatRequest, ChatResponse
@@ -279,7 +278,7 @@ async def chat_stream(request: ChatRequest):
             if request.session_id:
                 session = session_manager.get(request.session_id)
                 if not session:
-                    yield _sse_event("error", {"message": "会话不存在或已过期"})
+                    yield f"event: error\ndata: {json.dumps({'message': '会话不存在或已过期'}, ensure_ascii=False)}\n\n"
                     return
             else:
                 session = ChatSession()
@@ -289,38 +288,38 @@ async def chat_stream(request: ChatRequest):
                 print(f"[Stream] 新建会话: {session.thread_id[:8]}... (模式: {agent_mode})")
 
             # 发送会话ID
-            yield _sse_event("session", {"session_id": session.thread_id})
+            print(f"[Stream] 发送 session 事件: {session.thread_id[:8]}")
+            yield f"event: session\ndata: {json.dumps({'session_id': session.thread_id}, ensure_ascii=False)}\n\n"
 
             # 如果是首次对话，返回问候
             if not request.session_id and not request.message:
+                print(f"[Stream] 首次对话，调用 session.start()...")
                 result = await session.start()
-                yield _sse_event("message", {"content": result['reply']})
-                yield _sse_event("stage", {"stage": result['stage']})
-                yield _sse_event("done", {})
+                print(f"[Stream] session.start() 返回，发送问候消息")
+                yield f"event: message\ndata: {json.dumps({'content': result['reply']}, ensure_ascii=False)}\n\n"
+                yield f"event: stage\ndata: {json.dumps({'stage': result['stage']}, ensure_ascii=False)}\n\n"
+                yield f"event: done\ndata: {json.dumps({}, ensure_ascii=False)}\n\n"
+                print(f"[Stream] 问候消息发送完成")
                 return
 
-            # 发送进度消息
-            yield _sse_event("message", {"content": "正在思考中..."})
-
             # 处理用户消息
+            print(f"[Stream] 调用 session.chat()...")
             result = await session.chat(request.message)
+            print(f"[Stream] session.chat() 返回，发送回复")
 
             # 发送回复
-            yield _sse_event("message", {"content": result['reply']})
+            yield f"event: message\ndata: {json.dumps({'content': result['reply']}, ensure_ascii=False)}\n\n"
 
             # 发送阶段
-            yield _sse_event("stage", {
-                "stage": result['stage'],
-                "collected_info": result.get('collected_info'),
-                "missing_fields": result.get('missing_fields', [])
-            })
+            yield f"event: stage\ndata: {json.dumps({'stage': result['stage'], 'collected_info': result.get('collected_info'), 'missing_fields': result.get('missing_fields', [])}, ensure_ascii=False)}\n\n"
 
             # 如果有行程，发送行程数据
             if result.get('plan'):
-                yield _sse_event("plan", {"plan": result['plan']})
+                yield f"event: plan\ndata: {json.dumps({'plan': result['plan']}, ensure_ascii=False)}\n\n"
 
             # 完成信号
-            yield _sse_event("done", {})
+            yield f"event: done\ndata: {json.dumps({}, ensure_ascii=False)}\n\n"
+            print(f"[Stream] 所有事件发送完成")
 
             # 清理会话
             if result['stage'] == 'done':
@@ -330,14 +329,20 @@ async def chat_stream(request: ChatRequest):
             print(f"[Stream ERROR] {str(e)}")
             import traceback
             traceback.print_exc()
-            yield _sse_event("error", {"message": f"发生错误：{str(e)}"})
+            yield f"event: error\ndata: {json.dumps({'message': f'发生错误：{str(e)}'}, ensure_ascii=False)}\n\n"
 
-    return EventSourceResponse(generate())
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
-def _sse_event(event: str, data: dict) -> str:
-    """格式化 SSE 事件"""
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+# 删除旧的 _sse_event 函数
 
 
 @app.get("/api/chat/{session_id}/status")

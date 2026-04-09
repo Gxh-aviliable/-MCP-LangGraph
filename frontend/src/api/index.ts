@@ -71,6 +71,7 @@ export const api = {
 
   // 流式对话 API
   async chatStream(request: ChatRequest, callbacks: StreamCallbacks): Promise<void> {
+    console.log('[chatStream] 开始请求, request:', request)
     const response = await fetch(`${API_BASE}/chat/stream`, {
       method: 'POST',
       headers: {
@@ -80,12 +81,14 @@ export const api = {
     })
 
     if (!response.ok) {
+      console.error('[chatStream] 请求失败:', response.status)
       callbacks.onError?.(`请求失败: ${response.status}`)
       return
     }
 
     const reader = response.body?.getReader()
     if (!reader) {
+      console.error('[chatStream] 无法获取 reader')
       callbacks.onError?.('无法获取响应流')
       return
     }
@@ -93,49 +96,81 @@ export const api = {
     const decoder = new TextDecoder()
     let buffer = ''
 
+    // 解析单个事件块的辅助函数
+    const processEventBlock = (eventBlock: string) => {
+      if (!eventBlock.trim()) return
+
+      let eventType = 'message'
+      let eventData = ''
+
+      const lines = eventBlock.split('\n')
+      for (const line of lines) {
+        const trimmedLine = line.trim()
+        if (trimmedLine.startsWith('event:')) {
+          eventType = trimmedLine.substring(6).trim()
+        } else if (trimmedLine.startsWith('data:')) {
+          eventData = trimmedLine.substring(5).trim()
+        }
+      }
+
+      if (!eventData) return
+
+      try {
+        const data = JSON.parse(eventData)
+
+        switch (eventType) {
+          case 'session':
+            callbacks.onSession?.(data.session_id)
+            break
+          case 'message':
+            callbacks.onMessage?.(data.content)
+            break
+          case 'stage':
+            callbacks.onStage?.(data.stage, data.collected_info, data.missing_fields || [])
+            break
+          case 'plan':
+            callbacks.onPlan?.(data.plan)
+            break
+          case 'error':
+            callbacks.onError?.(data.message)
+            break
+          case 'done':
+            callbacks.onDone?.()
+            break
+        }
+      } catch (parseError) {
+        console.error('[chatStream] JSON 解析失败:', parseError, 'eventData:', eventData)
+      }
+    }
+
     try {
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break
 
-        buffer += decoder.decode(value, { stream: true })
+        if (value) {
+          buffer += decoder.decode(value, { stream: true })
 
-        // 解析 SSE 事件
-        const lines = buffer.split('\n\n')
-        buffer = lines.pop() || ''  // 保留不完整的部分
-
-        for (const line of lines) {
-          if (!line.trim()) continue
-
-          const eventMatch = line.match(/^event:\s*(\w+)\ndata:\s*(.+)$/s)
-          if (eventMatch) {
-            const eventType = eventMatch[1]
-            const data = JSON.parse(eventMatch[2])
-
-            switch (eventType) {
-              case 'session':
-                callbacks.onSession?.(data.session_id)
-                break
-              case 'message':
-                callbacks.onMessage?.(data.content)
-                break
-              case 'stage':
-                callbacks.onStage?.(data.stage, data.collected_info, data.missing_fields || [])
-                break
-              case 'plan':
-                callbacks.onPlan?.(data.plan)
-                break
-              case 'error':
-                callbacks.onError?.(data.message)
-                break
-              case 'done':
-                callbacks.onDone?.()
-                break
-            }
+          // SSE 格式: 每个事件块以 \n\n 结尾
+          // 我们需要正确分割事件块
+          // 事件块格式: event: xxx\ndata: yyy\n\n
+          let endIndex: number
+          while ((endIndex = buffer.indexOf('\n\n')) !== -1) {
+            const eventBlock = buffer.substring(0, endIndex)
+            buffer = buffer.substring(endIndex + 2)
+            processEventBlock(eventBlock)
           }
+        }
+
+        if (done) {
+          // 处理剩余的 buffer（可能有不完整的事件）
+          if (buffer.trim()) {
+            processEventBlock(buffer)
+          }
+          break
         }
       }
     } catch (error: any) {
+      console.error('[chatStream] 读取错误:', error)
       callbacks.onError?.(error.message || '流式读取错误')
     }
   },
