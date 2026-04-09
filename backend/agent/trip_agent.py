@@ -422,15 +422,24 @@ class ChatSession:
 
         # 检查是否是确认生成
         if stage == "confirming" and ready_to_plan:
-            # 【修复】先检查用户是否在补充可选参数
-            if self._contains_optional_info(user_message):
-                # 提取并更新可选参数
-                updated_info = await self._extract_optional_from_message(user_message, collected_info)
-                await self.chat_graph.aupdate_state(self.config, {"collected_info": updated_info})
+            # 使用 LLM 分析用户消息（复用 optional_guidance_node，统一识别方式）
+            result = await optional_guidance_node(self.llm, {
+                **current_values,
+                "user_feedback": user_message,
+            })
+
+            # 检查是否提取到新的可选参数
+            new_collected = result.get('collected_info', {})
+            if new_collected != collected_info:
+                # 用户提供了可选参数，更新状态并继续确认
+                await self.chat_graph.aupdate_state(self.config, {
+                    "collected_info": new_collected,
+                    "bot_reply": result.get('bot_reply', '好的，已记录您的信息。现在为您生成行程吗？')
+                })
                 return {
-                    "reply": f"好的，已记录您的信息。现在为您生成行程吗？",
+                    "reply": result.get('bot_reply', '好的，已记录您的信息。现在为您生成行程吗？'),
                     "stage": "confirming",
-                    "collected_info": updated_info,
+                    "collected_info": new_collected,
                     "missing_fields": [],
                     "plan": None
                 }
@@ -460,44 +469,6 @@ class ChatSession:
         new_state = await self.chat_graph.aget_state(self.config)
 
         return self._build_response(new_state.values)
-
-    def _contains_optional_info(self, message: str) -> bool:
-        """判断消息是否包含可选参数信息"""
-        keywords = {
-            'interests': ['喜欢', '景点', '公园', '博物馆', '古迹', '美食', '购物', '想去', '天安门', '故宫', '长城'],
-            'budget': ['预算', '钱', '元', '块', '花费', '2k', '3k'],
-            'accommodation': ['酒店', '住宿', '住'],
-            'transport': ['火车', '飞机', '高铁', '自驾']
-        }
-        message_lower = message.lower()
-        for category, words in keywords.items():
-            if any(word in message_lower for word in words):
-                return True
-        return False
-
-    async def _extract_optional_from_message(self, message: str, collected_info: Dict) -> Dict:
-        """从消息中提取可选参数"""
-        import re
-
-        updated = {**collected_info}
-
-        # 提取预算
-        budget_match = re.search(r'(\d+)[kK]|\b(\d{3,})\s*(元|块)', message)
-        if budget_match:
-            if budget_match.group(1):  # Xk format
-                budget = int(budget_match.group(1)) * 1000
-            else:
-                budget = int(budget_match.group(2))
-            updated['budget_per_day'] = budget // 3 if budget > 1000 else budget  # 总预算转日均
-
-        # 提取兴趣
-        interest_keywords = ['天安门', '故宫', '长城', '颐和园', '博物馆', '公园', '美食']
-        found_interests = [kw for kw in interest_keywords if kw in message]
-        if found_interests:
-            existing = updated.get('interests', [])
-            updated['interests'] = list(set(existing + found_interests))
-
-        return updated
 
     async def _handle_optional_collection(self, user_message: str, current_values: Dict[str, Any]) -> Dict[str, Any]:
         """处理可选参数收集阶段"""
