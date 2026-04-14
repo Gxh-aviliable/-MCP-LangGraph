@@ -2,21 +2,24 @@
 
 启动方式:
     uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+
+架构设计：
+    - 共享资源层（MCP工具、LLM）：启动时初始化一次，所有会话共用
+    - 状态层（LangGraph）：每个会话独立，保证对话隔离
 """
 import time
 import asyncio
-from typing import Dict, Optional
+import json
+from typing import Dict, Optional, Union, AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
-from backend.agent import TripChatSession
-from backend.model import TripRequest, FeedbackRequest
+from backend.agent import ChatSession, TripChatSession, SharedResourceManager
+from backend.model import TripRequest, FeedbackRequest, ChatRequest, ChatResponse
 from backend.config.settings import settings
 
 # ===================== 配置 =====================
-
-# 确认关键词（从统一配置读取）
-CONFIRM_KEYWORDS = settings.confirm_keywords
 
 # CORS 允许的来源（从配置读取，支持环境变量覆盖）
 ALLOWED_ORIGINS = settings.allowed_origins
@@ -37,6 +40,7 @@ class SessionManager:
     解决问题:
     - 内存泄漏：会话不再永久残留
     - 过期机制：长时间不活跃的会话会被清理
+    - 支持两种会话类型：ChatSession（对话式）和 TripChatSession（表单式）
     """
 
     def __init__(self, expire_seconds: int = 3600):
@@ -82,14 +86,14 @@ class SessionManager:
         if expired_keys:
             print(f"[SessionManager] 本次清理 {len(expired_keys)} 个过期会话")
 
-    def set(self, session_id: str, session: TripChatSession):
+    def set(self, session_id: str, session: Union[ChatSession, TripChatSession]):
         """存储会话"""
         self._sessions[session_id] = {
             'session': session,
             'last_active': time.time()
         }
 
-    def get(self, session_id: str) -> Optional[TripChatSession]:
+    def get(self, session_id: str) -> Optional[Union[ChatSession, TripChatSession]]:
         """获取会话（同时更新活跃时间）"""
         session_data = self._sessions.get(session_id)
         if session_data:
@@ -121,8 +125,8 @@ session_manager = SessionManager(expire_seconds=settings.session_expire_seconds)
 
 app = FastAPI(
     title="Travel Planning Agent API",
-    description="多轮对话旅行规划 Agent",
-    version="1.0.0"
+    description="对话式旅行规划 Agent",
+    version="2.0.0"
 )
 
 # CORS 配置（安全配置，不再使用 *）
@@ -137,10 +141,34 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """应用启动时初始化"""
+    """应用启动时初始化共享资源
+
+    架构说明：
+    - SharedResourceManager 是全局单例，管理 MCP 工具和 LLM
+    - 启动时初始化一次，后续所有会话共用（毫秒级创建）
+    - 每个会话有独立的 LangGraph 和 Checkpointer（状态隔离）
+    """
     await session_manager.start_cleanup_task()
     print(f"[Startup] CORS 允许的来源: {ALLOWED_ORIGINS}")
     print(f"[Startup] 会话过期时间: {session_manager._expire_seconds} 秒")
+
+    # 初始化共享资源（MCP 工具、LLM）
+    print("[Startup] 初始化共享资源（MCP 工具、LLM）...")
+    try:
+        manager = await asyncio.wait_for(
+            SharedResourceManager.ensure_initialized(),
+            timeout=120.0  # 给足够的初始化时间（MCP 需要 60+ 秒）
+        )
+        tools = manager.get_tools()
+        print("[Startup] 共享资源初始化成功!")
+        print(f"[Startup] 已加载 {len(tools)} 个 MCP 工具，所有会话将共用")
+        print("[Startup] 新会话创建将只需毫秒级（无需重新初始化 MCP）")
+
+    except asyncio.TimeoutError:
+        print("[Startup] 共享资源初始化超时（120秒）")
+        print("[Startup] 请检查 MCP 服务是否正常")
+    except Exception as e:
+        print(f"[Startup] 共享资源初始化失败: {e}")
 
 
 # ===================== API 路由 =====================
@@ -148,12 +176,200 @@ async def startup_event():
 @app.get("/")
 async def root():
     """健康检查"""
-    return {"status": "ok", "message": "Travel Planning Agent API"}
+    return {"status": "ok", "message": "Travel Planning Agent API v2.0"}
 
+
+# ===================== 对话式 API =====================
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """对话式交互 API
+
+    - 首次调用可不传 session_id，系统会创建新会话并返回问候消息
+    - 后续调用需传入 session_id 以保持对话上下文
+    - 返回的 stage 表示当前对话阶段：
+      - greeting: 问候阶段
+      - collecting: 收集信息阶段
+      - confirming: 确认阶段
+      - planning: 规划中
+      - refining: 调整阶段
+      - done: 完成
+    """
+    try:
+        # 获取或创建会话
+        if request.session_id:
+            session = session_manager.get(request.session_id)
+            if not session:
+                return ChatResponse(
+                    success=False,
+                    session_id=request.session_id,
+                    reply="会话不存在或已过期，请刷新页面重新开始。",
+                    stage="done",
+                    collected_info=None,
+                    missing_fields=[],
+                    plan=None
+                )
+        else:
+            # 创建新的对话会话（使用共享资源，毫秒级）
+            session = ChatSession()
+            # 传递用户选择的 Agent 模式
+            agent_mode = getattr(request, 'agent_mode', 'smart') or 'smart'
+            await session.initialize(agent_mode=agent_mode)
+            session_manager.set(session.thread_id, session)
+            print(f"[API] 新建会话: {session.thread_id[:8]}... (模式: {agent_mode})")
+
+        # 如果是首次对话，返回问候
+        if not request.session_id and not request.message:
+            result = await session.start()
+            return ChatResponse(
+                success=True,
+                session_id=session.thread_id,
+                reply=result['reply'],
+                stage=result['stage'],
+                collected_info=result['collected_info'],
+                missing_fields=result['missing_fields'],
+                plan=None
+            )
+
+        # 处理用户消息
+        result = await session.chat(request.message)
+
+        # 检查是否需要清理会话
+        if result['stage'] == 'done':
+            session_manager.delete(session.thread_id)
+            print(f"[API] 会话结束: {session.thread_id}")
+
+        return ChatResponse(
+            success=True,
+            session_id=session.thread_id,
+            reply=result['reply'],
+            stage=result['stage'],
+            collected_info=result.get('collected_info'),
+            missing_fields=result.get('missing_fields', []),
+            plan=result.get('plan')
+        )
+
+    except Exception as e:
+        print(f"[API ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return ChatResponse(
+            success=False,
+            session_id=request.session_id or "",
+            reply=f"抱歉，发生了错误：{str(e)}",
+            stage="collecting",
+            collected_info=None,
+            missing_fields=[],
+            plan=None
+        )
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """流式对话 API - 使用 SSE 实时推送进度
+
+    返回 SSE 事件流，包含：
+    - event: message / stage / plan / error / done
+    - data: JSON 格式的数据
+    """
+    async def generate() -> AsyncGenerator[str, None]:
+        try:
+            # 获取或创建会话
+            if request.session_id:
+                session = session_manager.get(request.session_id)
+                if not session:
+                    yield f"event: error\ndata: {json.dumps({'message': '会话不存在或已过期'}, ensure_ascii=False)}\n\n"
+                    return
+            else:
+                session = ChatSession()
+                agent_mode = getattr(request, 'agent_mode', 'smart') or 'smart'
+                await session.initialize(agent_mode=agent_mode)
+                session_manager.set(session.thread_id, session)
+                print(f"[Stream] 新建会话: {session.thread_id[:8]}... (模式: {agent_mode})")
+
+            # 发送会话ID
+            print(f"[Stream] 发送 session 事件: {session.thread_id[:8]}")
+            yield f"event: session\ndata: {json.dumps({'session_id': session.thread_id}, ensure_ascii=False)}\n\n"
+
+            # 如果是首次对话，返回问候
+            if not request.session_id and not request.message:
+                print(f"[Stream] 首次对话，调用 session.start()...")
+                result = await session.start()
+                print(f"[Stream] session.start() 返回，发送问候消息")
+                yield f"event: message\ndata: {json.dumps({'content': result['reply']}, ensure_ascii=False)}\n\n"
+                yield f"event: stage\ndata: {json.dumps({'stage': result['stage']}, ensure_ascii=False)}\n\n"
+                yield f"event: done\ndata: {json.dumps({}, ensure_ascii=False)}\n\n"
+                print(f"[Stream] 问候消息发送完成")
+                return
+
+            # 处理用户消息
+            print(f"[Stream] 调用 session.chat()...")
+            result = await session.chat(request.message)
+            print(f"[Stream] session.chat() 返回，发送回复")
+
+            # 发送回复
+            yield f"event: message\ndata: {json.dumps({'content': result['reply']}, ensure_ascii=False)}\n\n"
+
+            # 发送阶段
+            yield f"event: stage\ndata: {json.dumps({'stage': result['stage'], 'collected_info': result.get('collected_info'), 'missing_fields': result.get('missing_fields', [])}, ensure_ascii=False)}\n\n"
+
+            # 如果有行程，发送行程数据
+            if result.get('plan'):
+                yield f"event: plan\ndata: {json.dumps({'plan': result['plan']}, ensure_ascii=False)}\n\n"
+
+            # 完成信号
+            yield f"event: done\ndata: {json.dumps({}, ensure_ascii=False)}\n\n"
+            print(f"[Stream] 所有事件发送完成")
+
+            # 清理会话
+            if result['stage'] == 'done':
+                session_manager.delete(session.thread_id)
+
+        except Exception as e:
+            print(f"[Stream ERROR] {str(e)}")
+            import traceback
+            traceback.print_exc()
+            yield f"event: error\ndata: {json.dumps({'message': f'发生错误：{str(e)}'}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+# 删除旧的 _sse_event 函数
+
+
+@app.get("/api/chat/{session_id}/status")
+async def get_chat_status(session_id: str):
+    """获取会话状态"""
+    session = session_manager.get(session_id)
+
+    if not session:
+        return {"success": False, "error": "会话不存在或已过期"}
+
+    state = await session.get_current_state()
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "stage": state.get('conversation_stage', 'greeting'),
+        "collected_info": state.get('collected_info', {}),
+        "missing_fields": state.get('missing_fields', []),
+        "has_plan": state.get('final_plan') is not None
+    }
+
+
+# ===================== 兼容旧版 API =====================
 
 @app.post("/api/plan")
 async def create_plan(request: TripRequest):
-    """创建旅行规划
+    """创建旅行规划（兼容旧版表单模式）
 
     返回 session_id 用于后续多轮对话
     """
@@ -170,7 +386,7 @@ async def create_plan(request: TripRequest):
         if not plan:
             return {"success": False, "error": "规划失败"}
 
-        # 保存会话（使用新的会话管理器）
+        # 保存会话
         session_id = session.thread_id
         session_manager.set(session_id, session)
 
@@ -191,7 +407,7 @@ async def create_plan(request: TripRequest):
 
 @app.post("/api/feedback")
 async def submit_feedback(request: FeedbackRequest):
-    """提交反馈，继续多轮对话"""
+    """提交反馈，继续多轮对话（兼容旧版）"""
     print(f"\n[API] 收到反馈: session={request.session_id}, message={request.message}")
 
     session = session_manager.get(request.session_id)
@@ -202,8 +418,8 @@ async def submit_feedback(request: FeedbackRequest):
     try:
         plan = await session.feedback(request.message)
 
-        # 如果用户确认满意，清理会话（使用统一配置的确认关键词）
-        if request.message.strip() in CONFIRM_KEYWORDS:
+        # 如果用户确认满意，清理会话
+        if request.message.strip() in settings.confirm_keywords:
             session_manager.delete(request.session_id)
             print(f"[API] 会话结束: {request.session_id}, 剩余会话: {session_manager.count()}")
 

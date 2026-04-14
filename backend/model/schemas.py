@@ -1,6 +1,6 @@
 """数据模型定义"""
 from pydantic import BaseModel,Field,field_validator
-from typing import Optional,List
+from typing import Optional,List,Dict,Any
 
 
 """"=======================响应模型========================"""
@@ -43,11 +43,12 @@ class Hotel(BaseModel):
 
 class Budget(BaseModel):
     """预算信息"""
-    total_attractions: int = Field(default=0,description="景点门票总费用")
-    total_hotels: int = Field(default=0,description="酒店总费用")
-    total_meals: int = Field(default=0,description="餐饮总费用")
-    total_transportation: int = Field(default=0,description="交通总费用")
-    total: int = Field(default=0,description="总费用")
+    transport: float = Field(default=0.0, description="交通费用")
+    total_attractions: float = Field(default=0.0, description="景点门票总费用")
+    total_hotels: float = Field(default=0.0, description="酒店总费用")
+    total_meals: float = Field(default=0.0, description="餐饮总费用")
+    total_transportation: float = Field(default=0.0, description="交通总费用")
+    total: float = Field(default=0.0, description="总费用")
 
 class DayPlan(BaseModel):
     """单日行程"""
@@ -69,7 +70,7 @@ class WeatherInfo(BaseModel):
     night_temp: int = Field(...,description="夜间温度(摄氏度)")
     wind_direction: str = Field(...,description="风向")
     wind_power: str = Field(...,description="风力")
-    
+
     @field_validator('day_temp','night_temp',mode='before')
     def parse_temperature(cls,v):
         """解析温度字符串："16°C" -> 16"""
@@ -81,11 +82,31 @@ class WeatherInfo(BaseModel):
                 return 0  # 容错处理
         return v
 
+
+class TransportOption(BaseModel):
+    """交通方案"""
+    type: str = Field(..., description="交通类型: train/driving/flight")
+    name: str = Field(..., description="方案名称")
+    duration: str = Field(default="", description="耗时")
+    cost: float = Field(default=0.0, description="费用(元)")  # 改为 float，票价可能是 18.5
+    details: dict = Field(default_factory=dict, description="详细信息")
+
+
+class RecommendedTransport(BaseModel):
+    """推荐的交通方案"""
+    type: str = Field(..., description="交通类型")
+    name: str = Field(..., description="推荐的具体车次/路线")
+    reason: str = Field(default="", description="推荐理由")
+
+
 class TripPlan(BaseModel):
     """旅行计划"""
+    origin: str = Field(default="", description="出发地")
     city: str = Field(..., description="目的地城市")
     start_date: str = Field(..., description="开始日期")
     end_date: str = Field(..., description="结束日期")
+    transport_options: List[TransportOption] = Field(default_factory=list, description="交通方案列表")
+    recommended_transport: Optional[RecommendedTransport] = Field(default=None, description="推荐的交通方案")
     days: List[DayPlan] = Field(..., description="每日行程")
     weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
     overall_suggestions: str = Field(..., description="总体建议")
@@ -101,6 +122,7 @@ class TripPlanResponse(BaseModel):
 """"=======================请求模型========================"""
 class TripRequest(BaseModel):
     """旅行计划请求"""
+    origin: Optional[str] = Field(default=None, description="出发城市")
     city: str = Field(..., description="目的地城市")
     start_date: str = Field(..., description="开始日期 YYYY-MM-DD")
     end_date: str = Field(..., description="结束日期 YYYY-MM-DD")
@@ -114,3 +136,33 @@ class FeedbackRequest(BaseModel):
     """反馈请求 - 用于多轮对话"""
     session_id: str = Field(..., description="会话ID")
     message: str = Field(..., description="用户反馈消息")
+
+
+""""=======================对话模型========================"""
+class ChatRequest(BaseModel):
+    """对话请求 - 用于聊天式交互"""
+    session_id: Optional[str] = Field(default=None, description="会话ID，首次可为空")
+    message: str = Field(..., description="用户消息")
+    agent_mode: Optional[str] = Field(default="smart", description="Agent模式: smart(智能规划)/react(ReAct推理)")
+
+
+class CollectedInfo(BaseModel):
+    """已收集的旅行信息"""
+    origin: Optional[str] = Field(default=None, description="出发城市")
+    city: Optional[str] = Field(default=None, description="目的地城市")
+    start_date: Optional[str] = Field(default=None, description="开始日期")
+    end_date: Optional[str] = Field(default=None, description="结束日期")
+    interests: List[str] = Field(default_factory=list, description="兴趣偏好")
+    budget_per_day: Optional[int] = Field(default=None, description="每日预算")
+    accommodation_type: Optional[str] = Field(default=None, description="住宿类型")
+
+
+class ChatResponse(BaseModel):
+    """对话响应"""
+    success: bool = Field(default=True, description="是否成功")
+    session_id: str = Field(..., description="会话ID")
+    reply: str = Field(..., description="机器人回复")
+    stage: str = Field(..., description="对话阶段: greeting/collecting/confirming/planning/refining/done")
+    collected_info: Optional[Dict[str, Any]] = Field(default=None, description="已收集信息")
+    missing_fields: List[str] = Field(default_factory=list, description="缺失字段")
+    plan: Optional[dict] = Field(default=None, description="行程计划(生成后返回)")

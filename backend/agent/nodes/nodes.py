@@ -15,9 +15,16 @@ from backend.prompts import (
     ATTRACTION_AGENT_PROMPT,
     WEATHER_AGENT_PROMPT,
     HOTEL_AGENT_PROMPT,
+    TRANSPORT_AGENT_PROMPT,
     PLANNER_AGENT_PROMPT,
     INTENT_PARSER_PROMPT,
     ADJUSTMENT_PROMPT,
+    REQUIREMENT_ANALYZER_PROMPT,
+    RESPONSE_GENERATOR_PROMPT,
+    GREETING_MESSAGE,
+    TOOL_SELECTOR_PROMPT,
+    SPECIAL_INSTRUCTIONS_PROMPT,
+    OPTIONAL_GUIDANCE_PROMPT,
 )
 from backend.model import TripPlan
 from backend.config.settings import settings
@@ -111,6 +118,214 @@ def summarize_plan(plan: Optional[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+# ===================== POI 详情增强函数 =====================
+
+def parse_detail_result(result: Any) -> Dict[str, Any]:
+    """解析 maps_search_detail 返回结果
+
+    Args:
+        result: 工具返回的结果（可能是字符串或字典）
+
+    Returns:
+        解析后的详情字典，包含 rating, tel, cost 等
+    """
+    try:
+        if isinstance(result, str):
+            result = json.loads(result)
+
+        if isinstance(result, dict):
+            # 高德 API 可能返回多种格式
+            # 格式1: {pois: [...]}
+            # 格式2: 直接返回 POI 信息
+            data = result.get('pois', [result])[0] if 'pois' in result else result
+
+            # 提取详细信息
+            detail = {
+                'rating': data.get('rating'),
+                'cost': data.get('cost') or (data.get('biz_ext') or {}).get('cost'),
+                'tel': data.get('tel'),
+                'type': data.get('type'),
+                'typecode': data.get('typecode'),
+            }
+
+            # 提取图片（最多3张）
+            photos = data.get('photos', [])
+            if photos:
+                detail['photos'] = [p.get('url') for p in photos[:3] if p.get('url')]
+
+            # 提取营业时间
+            biz_ext = data.get('biz_ext', {})
+            if isinstance(biz_ext, dict):
+                if biz_ext.get('opening'):
+                    detail['opening_hours'] = biz_ext['opening']
+
+            # 过滤掉 None 值
+            return {k: v for k, v in detail.items() if v is not None}
+
+        return {}
+
+    except Exception as e:
+        print(f"[POI Detail] 解析失败: {e}")
+        return {}
+
+
+async def enrich_poi_details(
+    poi_list: List[Dict],
+    detail_tool,
+    max_details: int = 5
+) -> List[Dict]:
+    """为 POI 列表补充详细信息
+
+    Args:
+        poi_list: 基础 POI 列表
+        detail_tool: maps_search_detail 工具实例
+        max_details: 最多获取多少个 POI 的详情（避免过多 API 调用）
+
+    Returns:
+        补充了详细信息的 POI 列表
+    """
+    if not detail_tool or not poi_list:
+        return poi_list
+
+    enriched = []
+
+    for i, poi in enumerate(poi_list[:max_details]):
+        # 尝试多种可能的 ID 字段名
+        poi_id = (
+            poi.get('id') or
+            poi.get('poiid') or
+            poi.get('poi_id') or
+            poi.get('poiId')
+        )
+
+        if poi_id:
+            try:
+                print(f"[POI Detail] 正在获取 {poi.get('name', '未知')} 的详情...")
+                detail_result = await detail_tool.ainvoke({"id": poi_id})
+                detail_data = parse_detail_result(detail_result)
+
+                if detail_data:
+                    # 合并基础信息和详情
+                    enriched_poi = {**poi, **detail_data}
+                    enriched.append(enriched_poi)
+                    print(f"[POI Detail] 获取成功: rating={detail_data.get('rating')}, tel={detail_data.get('tel')}")
+                else:
+                    enriched.append(poi)
+
+            except Exception as e:
+                print(f"[POI Detail] 获取失败: {e}")
+                enriched.append(poi)  # 失败时保留原始数据
+        else:
+            enriched.append(poi)
+
+    # 超出 max_details 的保留原始数据
+    enriched.extend(poi_list[max_details:])
+
+    return enriched
+
+
+# ===================== 特殊说明提取函数 =====================
+
+async def extract_special_instructions(llm, user_message: str, collected_info: Dict[str, Any] = None) -> Dict[str, Any]:
+    """提取用户消息中的特殊说明
+
+    分析用户是否表达了跳过某些查询的意图，例如：
+    - "不看景点" -> skip_attraction
+    - "已订好酒店" -> skip_hotel
+    - "自己开车" -> skip_transport
+
+    Args:
+        llm: 语言模型实例
+        user_message: 用户消息文本
+        collected_info: 已收集的信息（用于上下文）
+
+    Returns:
+        特殊说明字典，包含 skip_attraction, skip_transport, skip_hotel 等
+    """
+    try:
+        print(f"\n[SpecialInstructions] 分析用户消息: {user_message[:50]}...")
+
+        # 格式化已收集信息
+        collected_str = json.dumps(collected_info or {}, ensure_ascii=False, indent=2)
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", SPECIAL_INSTRUCTIONS_PROMPT),
+            ("user", "请分析用户消息中的特殊说明")
+        ])
+
+        chain = prompt | llm
+
+        response = await chain.ainvoke({
+            "user_message": user_message,
+            "collected_info": collected_str
+        })
+
+        content = response.content
+        json_match = re.search(r'\{[\s\S]*\}', content)
+
+        if json_match:
+            result = json.loads(json_match.group())
+
+            # 确保所有字段都有默认值
+            special_instructions = {
+                "skip_attraction": result.get('skip_attraction', False),
+                "skip_attraction_reason": result.get('skip_attraction_reason', ''),
+                "skip_transport": result.get('skip_transport', False),
+                "skip_transport_reason": result.get('skip_transport_reason', ''),
+                "skip_hotel": result.get('skip_hotel', False),
+                "skip_hotel_reason": result.get('skip_hotel_reason', ''),
+                "skip_weather": result.get('skip_weather', False),
+                "skip_weather_reason": result.get('skip_weather_reason', ''),
+                "confidence": result.get('confidence', 'medium'),
+                "detected_keywords": result.get('detected_keywords', [])
+            }
+
+            # 打印结果便于调试
+            skipped_tools = [k.replace('skip_', '') for k, v in special_instructions.items()
+                           if k.startswith('skip_') and v is True]
+            if skipped_tools:
+                print(f"[SpecialInstructions] 检测到跳过意图: {skipped_tools}")
+                for tool in skipped_tools:
+                    reason = special_instructions.get(f'skip_{tool}_reason', '')
+                    print(f"   - {tool}: {reason}")
+
+            return special_instructions
+
+        # 解析失败，返回默认值
+        print("[SpecialInstructions] JSON解析失败，返回默认值")
+        return {
+            "skip_attraction": False,
+            "skip_attraction_reason": "",
+            "skip_transport": False,
+            "skip_transport_reason": "",
+            "skip_hotel": False,
+            "skip_hotel_reason": "",
+            "skip_weather": False,
+            "skip_weather_reason": "",
+            "confidence": "low",
+            "detected_keywords": []
+        }
+
+    except Exception as e:
+        print(f"[SpecialInstructions] 提取失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        # 出错时返回默认值（不跳过任何工具）
+        return {
+            "skip_attraction": False,
+            "skip_attraction_reason": "",
+            "skip_transport": False,
+            "skip_transport_reason": "",
+            "skip_hotel": False,
+            "skip_hotel_reason": "",
+            "skip_weather": False,
+            "skip_weather_reason": "",
+            "confidence": "low",
+            "detected_keywords": [],
+            "error": str(e)
+        }
+
+
 # ===================== 专家节点工厂函数 =====================
 
 def create_expert_node(
@@ -119,7 +334,8 @@ def create_expert_node(
     system_prompt: str,
     node_name: str,
     prepare_input: Callable[[ChatAgentState], str],
-    output_key: str
+    output_key: str,
+    enable_detail_enrich: bool = True  # 新增：是否启用详情增强
 ):
     """创建专家节点
 
@@ -130,6 +346,7 @@ def create_expert_node(
         node_name: 节点名称
         prepare_input: 输入准备函数
         output_key: 输出状态键名
+        enable_detail_enrich: 是否启用 POI 详情增强（景点/酒店适用）
 
     Returns:
         异步节点函数
@@ -156,6 +373,11 @@ def create_expert_node(
         filtered_tools = [tool]
     else:
         filtered_tools = tools
+
+    # 【新增】获取详情工具（用于景点/酒店详情增强）
+    detail_tool = tool_name_map.get("maps_search_detail")
+    if detail_tool and enable_detail_enrich:
+        print(f"[DEBUG] {node_name} 启用详情增强")
 
     print(f"[DEBUG] {node_name} 使用工具: {[t.name for t in filtered_tools]}")
 
@@ -185,6 +407,15 @@ def create_expert_node(
 
             structured_data = extract_json_from_text(output_text)
             print(f"[OK] {node_name} 提取 {len(structured_data)} 条数据")
+
+            # 【新增】为景点/酒店获取详细信息
+            if enable_detail_enrich and detail_tool and structured_data:
+                if "景点" in node_name or "酒店" in node_name or "attraction" in output_key or "hotel" in output_key:
+                    structured_data = await enrich_poi_details(
+                        structured_data,
+                        detail_tool,
+                        max_details=5
+                    )
 
             return {output_key: structured_data}
 
@@ -251,6 +482,151 @@ def create_hotel_node(llm, tools):
     )
 
 
+def create_hotel_node_v2(llm, tools):
+    """创建酒店专家节点 V2 - 支持景点周边搜索和详情增强
+
+    架构优化：
+    - 如果有景点数据，使用 maps_around_search 搜索景点附近酒店
+    - 如果没有景点数据，使用 maps_text_search 作为 fallback
+    - 获取酒店详细信息（评分、电话、价格等）
+    - 这样可以找到离景点最近的住宿，提升用户体验
+
+    Args:
+        llm: 语言模型
+        tools: 已加载的工具列表
+    """
+    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+    from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
+
+    # 过滤出酒店搜索需要的工具（支持两种搜索方式）
+    tool_name_map = {t.name: t for t in tools}
+    hotel_tools = []
+
+    # 周边搜索工具（优先）
+    if "maps_around_search" in tool_name_map:
+        hotel_tools.append(tool_name_map["maps_around_search"])
+
+    # 普通搜索工具（fallback）
+    if "maps_text_search" in tool_name_map:
+        hotel_tools.append(tool_name_map["maps_text_search"])
+
+    # 【新增】详情工具
+    detail_tool = tool_name_map.get("maps_search_detail")
+    if detail_tool:
+        print("[HotelV2] 启用详情增强")
+
+    if not hotel_tools:
+        print("[HotelV2] 警告: 未找到酒店搜索工具，返回空数据")
+        async def empty_node(state):
+            return {"hotels_data": []}
+        return empty_node
+
+    print(f"[HotelV2] 预加载工具: {[t.name for t in hotel_tools]}")
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", HOTEL_AGENT_PROMPT),
+        ("user", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ])
+
+    agent = create_tool_calling_agent(llm, hotel_tools, prompt)
+    executor = AgentExecutor(
+        agent=agent,
+        tools=hotel_tools,
+        verbose=settings.debug,
+        max_iterations=5,
+        handle_parsing_errors=True
+    )
+
+    async def node(state: ChatAgentState) -> Dict[str, Any]:
+        try:
+            city = state.get('city', '未知')
+            accommodation_type = state.get('accommodation_type', '中档')
+            attractions_data = state.get('attractions_data', [])
+
+            print(f"\n[HotelV2] 正在搜索 {city} 的酒店...")
+
+            # 判断是否有景点数据可用于周边搜索
+            has_attractions = attractions_data and len(attractions_data) > 0
+
+            if has_attractions:
+                # 提取第一个景点的坐标（作为搜索中心）
+                first_attraction = attractions_data[0]
+                location = None
+
+                # 尝试从景点数据中获取坐标
+                if isinstance(first_attraction, dict):
+                    loc = first_attraction.get('location', {})
+                    if isinstance(loc, dict):
+                        lon = loc.get('longitude') or loc.get('lon')
+                        lat = loc.get('latitude') or loc.get('lat')
+                        if lon and lat:
+                            location = f"{lon},{lat}"
+
+                if location:
+                    attraction_name = first_attraction.get('name', '景点')
+                    print(f"[HotelV2] 使用周边搜索，中心: {attraction_name} ({location})")
+
+                    input_str = f"""请搜索景点附近的酒店。
+
+景点信息:
+- 名称: {attraction_name}
+- 坐标: {location}
+
+任务:
+1. 使用 maps_around_search 工具，参数:
+   - location: "{location}"
+   - keywords: "酒店"
+   - radius: 2000
+2. 搜索完成后，将结果整理成 JSON 数组输出
+
+注意: 使用周边搜索可以找到离景点最近的酒店，方便游客出行。"""
+                else:
+                    # 有景点数据但没有坐标，fallback 到普通搜索
+                    print("[HotelV2] 景点无坐标，使用普通搜索")
+                    input_str = f"""请搜索 {city} 的酒店，住宿类型: {accommodation_type}。
+
+使用 maps_text_search 工具搜索:
+- keywords: "酒店"
+- city: "{city}"
+
+将结果整理成 JSON 数组输出。"""
+            else:
+                # 没有景点数据，使用普通搜索
+                print(f"[HotelV2] 无景点数据，使用普通搜索")
+                input_str = f"""请搜索 {city} 的酒店，住宿类型: {accommodation_type}。
+
+使用 maps_text_search 工具搜索:
+- keywords: "酒店"
+- city: "{city}"
+
+将结果整理成 JSON 数组输出。"""
+
+            result = await executor.ainvoke({"input": input_str})
+            output_text = result.get('output', '')
+
+            structured_data = extract_json_from_text(output_text)
+            print(f"[OK] HotelV2 搜索到 {len(structured_data)} 条酒店数据")
+
+            # 【新增】获取酒店详细信息
+            if detail_tool and structured_data:
+                structured_data = await enrich_poi_details(
+                    structured_data,
+                    detail_tool,
+                    max_details=5
+                )
+
+            return {"hotels_data": structured_data}
+
+        except Exception as e:
+            print(f"[FAIL] HotelV2 错误: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {"hotels_data": []}
+
+    return node
+
+
 # ===================== 规划节点 =====================
 
 async def plan_trip_node(llm, state: ChatAgentState) -> Dict[str, Any]:
@@ -265,8 +641,10 @@ async def plan_trip_node(llm, state: ChatAgentState) -> Dict[str, Any]:
         attractions = state.get('attractions_data', [])
         weather_info = state.get('weather_data', [])
         hotels = state.get('hotels_data', [])
+        transport_data = state.get('transport_data', [])
 
         print(f"   景点: {len(attractions)} 条, 天气: {len(weather_info)} 条, 酒店: {len(hotels)} 条")
+        print(f"   交通: {len(transport_data)} 条")
 
         planner_prompt = ChatPromptTemplate.from_messages([
             ("system", PLANNER_AGENT_PROMPT),
@@ -279,12 +657,21 @@ async def plan_trip_node(llm, state: ChatAgentState) -> Dict[str, Any]:
         weather_summary = format_weather(weather_info)
         hotels_summary = format_hotels(hotels)
 
+        # 格式化交通信息
+        transport_summary = "暂无交通信息"
+        if transport_data:
+            transport_lines = []
+            for t in transport_data[:5]:
+                transport_lines.append(f"- {t.get('name', '未知')}: 耗时{t.get('duration', '未知')}, 费用{t.get('cost', 0)}元")
+            transport_summary = "\n".join(transport_lines)
+
         res = await planner_chain.ainvoke({
             "context": f"""
 根据以下信息为用户生成详细的旅行计划：
 
 [用户需求]
-- 城市: {state['city']}
+- 出发地: {state.get('origin', '未指定')}
+- 目的地: {state['city']}
 - 日期: {state['start_date']} 至 {state['end_date']} ({trip_days}天)
 - 兴趣: {', '.join(state['interests'])}
 - 住宿: {state.get('accommodation_type') or '未指定'}
@@ -299,13 +686,35 @@ async def plan_trip_node(llm, state: ChatAgentState) -> Dict[str, Any]:
 【酒店选项】
 {hotels_summary}
 
+【交通方案】
+{transport_summary}
+
 请生成完整的 {trip_days} 天行程计划。
 """
         })
 
+        # 获取生成的计划并填充额外字段
+        plan_dict = res.model_dump()
+
+        # 填充交通方案
+        if transport_data:
+            plan_dict['transport_options'] = [
+                {
+                    "type": t.get('type', 'unknown'),
+                    "name": t.get('name', ''),
+                    "duration": t.get('duration', ''),
+                    "cost": t.get('cost', 0),
+                    "details": t.get('details', {})
+                }
+                for t in transport_data
+            ]
+
+        # 填充出发地
+        plan_dict['origin'] = state.get('origin', '')
+
         print("[OK] 行程规划完成")
         return {
-            "final_plan": res.model_dump(),
+            "final_plan": plan_dict,
             "messages": [{"role": "assistant", "content": "行程规划已完成，请查看并提出您的反馈。"}]
         }
 
@@ -417,3 +826,1078 @@ async def adjust_plan_node(llm, state: ChatAgentState) -> Dict[str, Any]:
         import traceback
         traceback.print_exc()
         return {"execution_errors": [f"调整失败: {str(e)}"]}
+
+
+# ===================== 对话式需求收集节点 =====================
+
+async def greeting_node(state: ChatAgentState) -> Dict[str, Any]:
+    """问候节点 - 初始化对话"""
+    print("\n[Greeting] 发送问候消息...")
+    return {
+        "bot_reply": GREETING_MESSAGE,
+        "conversation_stage": "greeting",
+        "messages": [{"role": "assistant", "content": GREETING_MESSAGE}]
+    }
+
+
+async def requirement_analyzer_node(llm, state: ChatAgentState) -> Dict[str, Any]:
+    """需求分析节点 - 解析用户消息，提取旅行信息
+
+    【Agent智能化改造】
+    - 除了提取结构化信息外，还会识别用户的特殊说明
+    - 例如："不看景点"、"已订好酒店"、"自己开车"等
+    - 这些特殊说明会影响后续的工具选择决策
+    """
+    try:
+        user_message = state.get('user_feedback', '')
+        collected_info = state.get('collected_info', {})
+        current_date = datetime.now().strftime('%Y-%m-%d')
+
+        if not user_message:
+            return {"conversation_stage": "collecting"}
+
+        print(f"\n[Analyzer] 分析用户消息: {user_message}")
+
+        # 格式化已收集信息
+        collected_str = json.dumps(collected_info, ensure_ascii=False) if collected_info else "暂无"
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", REQUIREMENT_ANALYZER_PROMPT),
+            ("user", "分析用户消息并提取旅行信息")
+        ])
+
+        chain = prompt | llm
+
+        response = await chain.ainvoke({
+            "current_date": current_date,
+            "collected_info": collected_str,
+            "user_message": user_message
+        })
+
+        content = response.content
+        json_match = re.search(r'\{[\s\S]*\}', content)
+
+        if json_match:
+            result = json.loads(json_match.group())
+            extracted = result.get('extracted', {})
+            missing = result.get('missing', [])
+            ready = result.get('ready', False)
+            suggestions = result.get('suggestions', [])
+
+            # 合并已收集信息和新提取的信息
+            new_collected = {**collected_info}
+            for key, value in extracted.items():
+                if value is not None and value != [] and value != "":
+                    new_collected[key] = value
+
+            print(f"[OK] 提取信息: {extracted}, 缺失: {missing}, 就绪: {ready}")
+
+            # 【Agent智能化】提取用户特殊说明
+            # 这一步让Agent能够理解用户的意图，而不仅仅是提取字段
+            special_instructions = await extract_special_instructions(
+                llm, user_message, new_collected
+            )
+
+            # 更新状态字段
+            origin = new_collected.get('origin', '')
+            city = new_collected.get('city', '')
+            start_date = new_collected.get('start_date', '')
+            end_date = new_collected.get('end_date', '')
+
+            return {
+                "collected_info": new_collected,
+                "missing_fields": missing,
+                "ready_to_plan": ready,
+                "origin": origin,
+                "city": city,
+                "start_date": start_date,
+                "end_date": end_date,
+                "interests": new_collected.get('interests', []),
+                "budget_per_day": new_collected.get('budget_per_day'),
+                "accommodation_type": new_collected.get('accommodation_type'),
+                "messages": [{"role": "user", "content": user_message}],
+                # 【修复】必要参数完成后进入可选参数引导阶段
+                "conversation_stage": "optional_collecting" if ready else "collecting",
+                # 【新增】传递特殊说明到状态
+                "special_instructions": special_instructions,
+            }
+
+        return {"conversation_stage": "collecting"}
+
+    except Exception as e:
+        print(f"[FAIL] 需求分析错误: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"conversation_stage": "collecting", "execution_errors": [f"分析失败: {str(e)}"]}
+
+
+async def response_generator_node(llm, state: ChatAgentState) -> Dict[str, Any]:
+    """响应生成节点 - 根据对话阶段生成回复"""
+    try:
+        stage = state.get('conversation_stage', 'greeting')
+        collected_info = state.get('collected_info', {})
+        missing_fields = state.get('missing_fields', [])
+        user_message = state.get('user_feedback', '')
+        current_plan = state.get('final_plan')
+
+        print(f"\n[Response] 生成回复, 阶段: {stage}")
+
+        # 格式化参数
+        collected_str = json.dumps(collected_info, ensure_ascii=False, indent=2) if collected_info else "暂无"
+        missing_str = ", ".join(missing_fields) if missing_fields else "无"
+        plan_summary = summarize_plan(current_plan) if current_plan else "暂无行程"
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", RESPONSE_GENERATOR_PROMPT),
+            ("user", "根据对话阶段生成回复")
+        ])
+
+        chain = prompt | llm
+
+        response = await chain.ainvoke({
+            "stage": stage,
+            "collected_info": collected_str,
+            "missing_fields": missing_str,
+            "user_message": user_message,
+            "plan_summary": plan_summary
+        })
+
+        content = response.content
+        json_match = re.search(r'\{[\s\S]*\}', content)
+
+        if json_match:
+            result = json.loads(json_match.group())
+            reply = result.get('reply', '请告诉我您的旅行需求。')
+            # 安全打印，避免Windows终端编码错误
+            try:
+                safe_reply = reply[:50].encode('utf-8', errors='replace').decode('utf-8')
+                print(f"[OK] 生成回复: {safe_reply}...")
+            except:
+                print(f"[OK] 生成回复: (包含特殊字符)")
+            return {
+                "bot_reply": reply,
+                "messages": [{"role": "assistant", "content": reply}]
+            }
+
+        # 如果无法解析，返回默认回复
+        default_reply = "请告诉我您想去哪里旅行？"
+        return {
+            "bot_reply": default_reply,
+            "messages": [{"role": "assistant", "content": default_reply}]
+        }
+
+    except Exception as e:
+        print(f"[FAIL] 响应生成错误: {str(e)}")
+        return {
+            "bot_reply": "抱歉，我遇到了一些问题。请重新描述您的需求。",
+            "messages": [{"role": "assistant", "content": "抱歉，我遇到了一些问题。请重新描述您的需求。"}]
+        }
+
+
+async def confirm_check_node(state: ChatAgentState) -> str:
+    """确认检查节点 - 判断用户是否确认生成计划"""
+    user_message = state.get('user_feedback', '').strip().lower()
+    confirm_keywords = ['是', '好', '生成', '可以', '确认', '没问题', 'ok', 'yes', '开始']
+
+    # 检查是否包含确认关键词
+    for keyword in confirm_keywords:
+        if keyword in user_message:
+            return "confirmed"
+
+    # 检查是否是拒绝
+    reject_keywords = ['不', '否', '取消', '等等', '再想想']
+    for keyword in reject_keywords:
+        if keyword in user_message:
+            return "rejected"
+
+    return "pending"
+
+
+async def optional_guidance_node(llm, state: ChatAgentState) -> Dict[str, Any]:
+    """可选参数引导节点 - 支持多轮引导
+
+    这是可选的、轻松的引导，不会强制用户填写：
+    - 如果用户说"直接生成"、"不用了"，就跳过
+    - 如果用户提供部分信息，继续引导直到达到轮次上限
+    - 最多引导3轮，避免无限引导
+    """
+    MAX_OPTIONAL_ROUNDS = 3
+
+    try:
+        user_message = state.get('user_feedback', '')
+        collected_info = state.get('collected_info', {})
+        optional_round = state.get('optional_round', 0)
+
+        # 计算行程天数
+        start_date = collected_info.get('start_date', '')
+        end_date = collected_info.get('end_date', '')
+        duration = "未知"
+        if start_date and end_date:
+            try:
+                from datetime import datetime
+                start = datetime.strptime(start_date, '%Y-%m-%d')
+                end = datetime.strptime(end_date, '%Y-%m-%d')
+                duration = str((end - start).days + 1)
+            except:
+                pass
+
+        # 当前可选参数状态
+        interests = collected_info.get('interests', [])
+        budget = collected_info.get('budget_per_day')
+        accommodation = collected_info.get('accommodation_type')
+        transport = collected_info.get('transportation_mode')
+
+        optional_status = f"""- 兴趣偏好: {', '.join(interests) if interests else '未填写'}
+- 每日预算: {f'{budget}元/天' if budget else '未填写'}
+- 住宿类型: {accommodation or '未填写'}
+- 交通偏好: {transport or '未填写'}"""
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", OPTIONAL_GUIDANCE_PROMPT),
+            ("user", "{user_message}")
+        ])
+
+        chain = prompt | llm
+
+        response = await chain.ainvoke({
+            "origin": collected_info.get('origin', '未知'),
+            "city": collected_info.get('city', '未知'),
+            "start_date": start_date,
+            "end_date": end_date,
+            "duration": duration,
+            "optional_status": optional_status,
+            "user_message": user_message
+        })
+
+        content = response.content
+        json_match = re.search(r'\{[\s\S]*\}', content)
+
+        if json_match:
+            result = json.loads(json_match.group())
+            reply = result.get('reply', '好的，为您生成行程！')
+            skip_optional = result.get('skip_optional', False)
+            extracted = result.get('extracted_optional', {})
+
+            # 合并提取的可选参数
+            new_collected = {**collected_info}
+            if extracted:
+                for key, value in extracted.items():
+                    if value is not None and value != [] and value != "":
+                        new_collected[key] = value
+
+            # 计算新轮次
+            new_round = optional_round + 1
+            print(f"[Optional] 轮次: {new_round}, 用户跳过: {skip_optional}, 提取: {extracted}")
+
+            # 判断是否应该结束引导
+            should_end_guidance = (
+                skip_optional or  # 用户明确跳过
+                new_round >= MAX_OPTIONAL_ROUNDS or  # 达到轮次上限
+                _all_optional_filled(new_collected)  # 所有可选参数都已填写
+            )
+
+            if should_end_guidance:
+                # 结束引导，进入确认阶段
+                return {
+                    "bot_reply": reply,
+                    "collected_info": new_collected,
+                    "optional_collected": True,
+                    "optional_skipped": skip_optional,
+                    "optional_round": new_round,
+                    "conversation_stage": "confirming",
+                    "messages": [{"role": "assistant", "content": reply}]
+                }
+            else:
+                # 继续引导，保持在可选参数阶段
+                continue_reply = f"{reply}\n\n还有其他偏好吗？比如预算、住宿类型等？或者回复'直接生成'开始规划。"
+                return {
+                    "bot_reply": continue_reply,
+                    "collected_info": new_collected,
+                    "optional_collected": False,  # 继续引导
+                    "optional_skipped": False,
+                    "optional_round": new_round,
+                    "conversation_stage": "optional_collecting",  # 保持在可选参数阶段
+                    "messages": [{"role": "assistant", "content": continue_reply}]
+                }
+
+        # 默认回复 - 结束引导
+        default_reply = "好的，现在为您生成行程！"
+        return {
+            "bot_reply": default_reply,
+            "collected_info": collected_info,
+            "optional_collected": True,
+            "optional_skipped": True,
+            "optional_round": optional_round + 1,
+            "conversation_stage": "confirming",
+            "messages": [{"role": "assistant", "content": default_reply}]
+        }
+
+    except Exception as e:
+        print(f"[Optional Error] {e}")
+        # 出错时结束引导
+        return {
+            "bot_reply": "好的，现在为您生成行程！",
+            "collected_info": state.get('collected_info', {}),
+            "optional_collected": True,
+            "optional_skipped": True,
+            "optional_round": state.get('optional_round', 0) + 1,
+            "conversation_stage": "confirming"
+        }
+
+
+def _all_optional_filled(collected_info: Dict) -> bool:
+    """检查所有可选参数是否都已填写"""
+    optional_fields = ['interests', 'budget_per_day', 'accommodation_type', 'transportation_mode']
+    return all(
+        collected_info.get(field) not in [None, [], '', {}]
+        for field in optional_fields
+    )
+
+
+async def stage_router_node(state: ChatAgentState) -> str:
+    """阶段路由节点 - 根据状态决定下一步"""
+    stage = state.get('conversation_stage', 'greeting')
+    ready_to_plan = state.get('ready_to_plan', False)
+    user_confirmed = state.get('user_confirmed', False)
+    has_plan = state.get('final_plan') is not None
+
+    # 如果已有行程，检查是否需要调整
+    if has_plan:
+        user_feedback = state.get('user_feedback', '')
+        if user_feedback and user_feedback.strip() not in ['确认', '满意', '好的']:
+            return "refining"
+        return "done"
+
+    # 根据阶段路由
+    if stage == "greeting":
+        return "collecting"
+
+    if stage == "collecting":
+        if ready_to_plan:
+            # 必要参数收集完成，先进入可选参数引导
+            optional_collected = state.get('optional_collected', False)
+            if not optional_collected:
+                return "optional_collecting"
+            return "confirming"
+        return "collecting"
+
+    if stage == "optional_collecting":
+        # 检查可选参数是否已完成
+        optional_collected = state.get('optional_collected', False)
+        if optional_collected:
+            return "confirming"
+        # 继续可选参数引导
+        return "optional_collecting"
+
+    if stage == "confirming":
+        if user_confirmed:
+            return "planning"
+        return "confirming"
+
+    if stage == "planning":
+        return "planning"
+
+    return "collecting"
+
+
+# ===================== 交通查询节点 =====================
+
+def create_transport_node_v3(llm, tools):
+    """创建交通专家节点 V3 - 使用 LLM + 工具调用
+
+    Args:
+        llm: 语言模型
+        tools: 已加载的工具列表（会自动过滤出12306相关工具）
+    """
+    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+    from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
+    import asyncio
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", TRANSPORT_AGENT_PROMPT),
+        ("user", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ])
+
+    # 预先过滤出12306相关工具
+    train_tools = []
+    for tool in tools:
+        name_lower = tool.name.lower()
+        if "station" in name_lower or "ticket" in name_lower:
+            if "interline" not in name_lower:
+                train_tools.append(tool)
+
+    if train_tools:
+        print(f"[Transport] 预加载 {len(train_tools)} 个 12306 工具: {[t.name for t in train_tools]}")
+    else:
+        print("[Transport] 警告: 未找到 12306 工具，交通查询将跳过")
+
+    async def node(state: ChatAgentState) -> Dict[str, Any]:
+        try:
+            origin = state.get('origin', '')
+            destination = state.get('city', '')
+            start_date = state.get('start_date', '')
+
+            print(f"\n[Transport] 查询交通: {origin} -> {destination}, 日期: {start_date}")
+
+            if not origin:
+                print("[Transport] 无出发地，跳过交通查询")
+                return {"transport_data": []}
+
+            if not train_tools:
+                print("[Transport] 无可用工具，跳过交通查询")
+                return {"transport_data": []}
+
+            print(f"[Transport] 使用工具: {[t.name for t in train_tools]}")
+
+            agent = create_tool_calling_agent(llm, train_tools, prompt)
+            executor = AgentExecutor(
+                agent=agent,
+                tools=train_tools,
+                verbose=settings.debug,
+                max_iterations=5,
+                handle_parsing_errors=True
+            )
+
+            input_str = f"""请查询从 {origin} 到 {destination} 的火车票，出发日期：{start_date}
+
+步骤：
+1. 调用 get-stations-code-in-city 获取 {origin} 的站点代码
+2. 调用 get-stations-code-in-city 获取 {destination} 的站点代码
+3. 调用 get-tickets 查询车票（参数：fromStation, toStation, date）
+
+最后将结果整理成 JSON 数组输出。"""
+
+            # 重试机制：最多重试3次
+            MAX_RETRIES = 3
+            last_error = None
+
+            for attempt in range(MAX_RETRIES):
+                try:
+                    result = await asyncio.wait_for(
+                        executor.ainvoke({"input": input_str}),
+                        timeout=60.0
+                    )
+
+                    # 成功，处理结果
+                    output_text = result.get('output', '')
+
+                    # 提取 JSON 数据
+                    structured_data = extract_json_from_text(output_text)
+
+                    # 转换为标准格式
+                    transport_results = []
+                    for item in structured_data:
+                        if isinstance(item, dict):
+                            transport_results.append({
+                                "type": item.get("type", "train"),
+                                "name": item.get("name", item.get("trainCode", item.get("train_code", "未知"))),
+                                "duration": item.get("duration", item.get("runTime", "")),
+                                "cost": item.get("cost", item.get("price", 0)),
+                                "details": item
+                            })
+
+                    print(f"[OK] Transport 查询到 {len(transport_results)} 条交通方案")
+                    return {"transport_data": transport_results}
+
+                except asyncio.TimeoutError:
+                    last_error = "查询超时（60秒）"
+                    print(f"[Transport] 第 {attempt + 1} 次尝试超时")
+                    if attempt < MAX_RETRIES - 1:
+                        await asyncio.sleep(2)  # 等待2秒后重试
+                        continue
+
+                except Exception as net_err:
+                    error_msg = str(net_err).lower()
+                    if any(kw in error_msg for kw in ['connect', 'connection', 'timeout', 'network', 'refused', 'unreachable']):
+                        last_error = str(net_err)[:100]
+                        print(f"[Transport] 第 {attempt + 1} 次尝试失败: {last_error}")
+                        if attempt < MAX_RETRIES - 1:
+                            await asyncio.sleep(2)  # 等待2秒后重试
+                            continue
+                    else:
+                        # 非网络错误，直接抛出
+                        raise
+
+            # 重试3次后仍然失败
+            print(f"[Transport] 重试 {MAX_RETRIES} 次后仍失败: {last_error}")
+            return {"transport_data": []}
+
+        except Exception as e:
+            # 其他非网络错误
+            print(f"[FAIL] 交通查询错误: {str(e)[:100]}")
+            return {"transport_data": []}
+
+    return node
+
+
+def _parse_station_codes(result: Any) -> List[str]:
+    """解析站点代码结果"""
+    try:
+        if isinstance(result, str):
+            data = json.loads(result)
+        else:
+            data = result
+
+        if isinstance(data, dict):
+            if 'return' in data:
+                stations = data['return']
+            elif 'data' in data:
+                stations = data['data']
+            else:
+                stations = data
+        else:
+            stations = data
+
+        if isinstance(stations, list):
+            codes = []
+            for station in stations:
+                if isinstance(station, dict):
+                    code = station.get('station_code') or station.get('code') or station.get('telecode')
+                    if code:
+                        codes.append(code)
+            return codes
+        return []
+    except:
+        return []
+
+
+def _parse_tickets_result(result: Any) -> List[Dict]:
+    """解析火车票查询结果"""
+    try:
+        if isinstance(result, str):
+            data = json.loads(result)
+        else:
+            data = result
+
+        if isinstance(data, dict):
+            if 'return' in data:
+                return data['return'] if isinstance(data['return'], list) else []
+            if 'data' in data:
+                return data['data'] if isinstance(data['data'], list) else []
+        if isinstance(data, list):
+            return data
+        return []
+    except:
+        return []
+
+
+def _extract_coords(geo_result: Any) -> Optional[str]:
+    """从地理编码结果中提取坐标"""
+    try:
+        if isinstance(geo_result, str):
+            data = json.loads(geo_result)
+        else:
+            data = geo_result
+
+        if isinstance(data, dict) and 'return' in data:
+            if isinstance(data['return'], list) and len(data['return']) > 0:
+                return data['return'][0].get('location')
+        return None
+    except:
+        return None
+
+
+def _parse_driving_result(result: Any) -> Optional[Dict]:
+    """解析自驾路线结果"""
+    try:
+        if isinstance(result, str):
+            data = json.loads(result)
+        else:
+            data = result
+
+        if isinstance(data, dict) and 'return' in data:
+            route = data['return']
+            if isinstance(route, list) and len(route) > 0:
+                route_info = route[0]
+                return {
+                    "distance": route_info.get('distance', ''),
+                    "duration": route_info.get('duration', ''),
+                    "tolls": route_info.get('tolls', 0),
+                    "route": route_info.get('strategy', '')
+                }
+        return None
+    except:
+        return None
+
+
+# ===================== 智能工具选择器节点 =====================
+
+async def tool_selector_node(llm, state: ChatAgentState) -> Dict[str, Any]:
+    """智能工具选择器 - 使用 LLM 决定需要调用哪些工具
+
+    这是 Agent 智能化的核心：
+    - 首先检查 special_instructions（用户明确表达的跳过意图）
+    - 然后使用 LLM 进行补充决策
+    - 支持用户说"不看景点"、"已订好酒店"等场景
+    - 给出决策原因便于调试和理解
+    """
+    try:
+        print("\n[ToolSelector] 正在分析需要调用的工具...")
+
+        # 【Agent智能化】首先检查用户特别说明
+        special_instructions = state.get('special_instructions', {})
+
+        # 默认工具决策
+        tool_decisions = {
+            "attraction": True,
+            "weather": True,
+            "transport": True,
+            "hotel": True
+        }
+        decision_reasons = []
+
+        # 如果有明确特殊说明，优先使用
+        if special_instructions:
+            # 处理景点跳过
+            if special_instructions.get('skip_attraction'):
+                tool_decisions['attraction'] = False
+                reason = special_instructions.get('skip_attraction_reason', '用户特别说明')
+                decision_reasons.append(f"景点: 跳过（{reason}）")
+                print(f"[ToolSelector] 根据用户特别说明跳过景点查询: {reason}")
+
+            # 处理交通跳过
+            if special_instructions.get('skip_transport'):
+                tool_decisions['transport'] = False
+                reason = special_instructions.get('skip_transport_reason', '用户特别说明')
+                decision_reasons.append(f"交通: 跳过（{reason}）")
+                print(f"[ToolSelector] 根据用户特别说明跳过交通查询: {reason}")
+
+            # 处理酒店跳过
+            if special_instructions.get('skip_hotel'):
+                tool_decisions['hotel'] = False
+                reason = special_instructions.get('skip_hotel_reason', '用户特别说明')
+                decision_reasons.append(f"酒店: 跳过（{reason}）")
+                print(f"[ToolSelector] 根据用户特别说明跳过酒店查询: {reason}")
+
+            # 处理天气跳过
+            if special_instructions.get('skip_weather'):
+                tool_decisions['weather'] = False
+                reason = special_instructions.get('skip_weather_reason', '用户特别说明')
+                decision_reasons.append(f"天气: 跳过（{reason}）")
+                print(f"[ToolSelector] 根据用户特别说明跳过天气查询: {reason}")
+
+        # 如果所有工具都有明确决策（来自用户特别说明），直接返回
+        if decision_reasons and all(k in ['attraction', 'weather', 'transport', 'hotel'] for k in tool_decisions.keys()):
+            print(f"[ToolSelector] 基于用户特别说明完成决策: {tool_decisions}")
+            return {
+                "tool_decisions": tool_decisions,
+                "tool_decision_reason": "用户特别说明: " + "; ".join(decision_reasons)
+            }
+
+        # 如果还有未决策的工具，使用 LLM 进行补充决策
+        # 提取用户需求
+        origin = state.get('origin', '未指定')
+        city = state.get('city', '未指定')
+        start_date = state.get('start_date', '未指定')
+        end_date = state.get('end_date', '未指定')
+        interests = state.get('interests', [])
+        budget = state.get('budget_per_day', '未指定')
+        accommodation = state.get('accommodation_type', '未指定')
+        transportation = state.get('transportation_mode', '未指定')
+
+        # 从对话历史中提取用户特别说明
+        user_notes = ""
+        messages = state.get('messages', [])
+        if messages:
+            # 提取最近的用户消息
+            recent_user_messages = [
+                m.get('content', '') for m in messages[-5:]
+                if m.get('role') == 'user'
+            ]
+            if recent_user_messages:
+                user_notes = "\n".join(recent_user_messages)
+
+        # 如果没有特别说明，标注为"无"
+        if not user_notes:
+            user_notes = "无特别说明"
+
+        # 构建 prompt
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", TOOL_SELECTOR_PROMPT),
+            ("user", "请根据以上信息进行决策")
+        ])
+
+        chain = prompt | llm
+
+        response = await chain.ainvoke({
+            "origin": origin,
+            "city": city,
+            "start_date": start_date,
+            "end_date": end_date,
+            "interests": ', '.join(interests) if interests else '无特别偏好',
+            "budget_per_day": budget,
+            "accommodation_type": accommodation,
+            "transportation_mode": transportation,
+            "user_notes": user_notes
+        })
+
+        content = response.content
+
+        # 解析 JSON 响应
+        json_match = re.search(r'\{[\s\S]*\}', content)
+        if json_match:
+            result = json.loads(json_match.group())
+            llm_decisions = result.get('tool_decisions', {})
+            llm_reason = result.get('reason', '')
+
+            # 合并决策：用户特别说明优先于 LLM 决策
+            for tool in ['attraction', 'weather', 'transport', 'hotel']:
+                if tool_decisions.get(tool) is True:  # 还没有被用户特别说明覆盖
+                    tool_decisions[tool] = llm_decisions.get(tool, True)
+
+            final_reason = "用户特别说明: " + "; ".join(decision_reasons) if decision_reasons else ""
+            if llm_reason:
+                final_reason += (" | LLM决策: " + llm_reason) if final_reason else "LLM决策: " + llm_reason
+
+            print(f"[ToolSelector] 最终决策结果: {tool_decisions}")
+            print(f"[ToolSelector] 决策原因: {final_reason}")
+
+            # 统计需要调用的工具数量
+            enabled_tools = [k for k, v in tool_decisions.items() if v]
+            skipped_tools = [k for k, v in tool_decisions.items() if not v]
+
+            if skipped_tools:
+                print(f"[ToolSelector] 跳过的工具: {skipped_tools}")
+            print(f"[ToolSelector] 需要调用的工具: {enabled_tools}")
+
+            return {
+                "tool_decisions": tool_decisions,
+                "tool_decision_reason": final_reason or "默认调用所有工具"
+            }
+
+        # 解析失败，使用已有的用户特别说明决策
+        if decision_reasons:
+            print(f"[ToolSelector] LLM解析失败，使用用户特别说明: {tool_decisions}")
+            return {
+                "tool_decisions": tool_decisions,
+                "tool_decision_reason": "用户特别说明: " + "; ".join(decision_reasons)
+            }
+
+        # 完全解析失败，默认全部调用
+        print("[ToolSelector] JSON 解析失败，默认调用所有工具")
+        return {
+            "tool_decisions": {
+                "attraction": True,
+                "weather": True,
+                "transport": True,
+                "hotel": True
+            },
+            "tool_decision_reason": "解析失败，默认调用所有工具"
+        }
+
+    except Exception as e:
+        print(f"[ToolSelector] 决策错误: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        # 出错时默认全部调用
+        return {
+            "tool_decisions": {
+                "attraction": True,
+                "weather": True,
+                "transport": True,
+                "hotel": True
+            },
+            "tool_decision_reason": f"决策出错: {str(e)}"
+        }
+
+
+def create_skip_node(node_name: str):
+    """创建跳过节点 - 当工具不需要调用时使用"""
+    async def skip_node(state: ChatAgentState) -> Dict[str, Any]:
+        print(f"[{node_name}] 根据决策跳过此查询")
+        return {}
+    return skip_node
+
+
+# ===================== 反思与重规划节点 =====================
+
+async def reflection_node(llm, state: ChatAgentState) -> Dict[str, Any]:
+    """反思节点 - 评估行程质量，决定是否重规划
+
+    这是 Agent 自我反思能力的核心：
+    - 使用 PlanEvaluator 评估行程质量
+    - 根据评估结果决定是否需要重新规划
+    - 记录评估指标便于调试和理解
+
+    Returns:
+        {
+            "need_replan": bool,
+            "replan_reason": str,
+            "plan_metrics": PlanMetrics,
+            "iteration_count": int
+        }
+    """
+    from backend.evaluation import PlanEvaluator
+
+    try:
+        print("\n[Reflection] 正在评估行程质量...")
+
+        plan = state.get('final_plan')
+        if not plan:
+            print("[Reflection] 无行程，需要规划")
+            return {
+                "need_replan": True,
+                "replan_reason": "无行程数据",
+                "iteration_count": state.get('iteration_count', 0)
+            }
+
+        # 构建需求字典
+        requirements = {
+            "origin": state.get('origin'),
+            "city": state.get('city'),
+            "start_date": state.get('start_date'),
+            "end_date": state.get('end_date'),
+            "interests": state.get('interests', []),
+            "budget_per_day": state.get('budget_per_day'),
+        }
+
+        # 评估行程
+        evaluator = PlanEvaluator()
+        metrics = evaluator.evaluate(plan, requirements)
+
+        print(f"[Reflection] 评估结果: 总分={metrics.overall_score:.2f}")
+        print(f"   完整性={metrics.completeness_score:.2f}, 时间合理性={metrics.time_efficiency:.2f}")
+        if metrics.issues:
+            print(f"   问题: {', '.join(metrics.issues)}")
+
+        # 决定是否重规划
+        iteration = state.get('iteration_count', 0)
+        should_replan, reason = evaluator.should_replan(metrics, iteration)
+
+        if should_replan:
+            print(f"[Reflection] 需要重规划: {reason}")
+        else:
+            print(f"[Reflection] 行程质量可接受")
+
+        return {
+            "need_replan": should_replan,
+            "replan_reason": reason,
+            "plan_metrics": {
+                "overall_score": metrics.overall_score,
+                "completeness_score": metrics.completeness_score,
+                "time_efficiency": metrics.time_efficiency,
+                "route_optimality": metrics.route_optimality,
+                "budget_accuracy": metrics.budget_accuracy,
+                "issues": metrics.issues,
+                "suggestions": metrics.suggestions,
+            },
+            "iteration_count": iteration + (1 if should_replan else 0)
+        }
+
+    except Exception as e:
+        print(f"[Reflection] 评估错误: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        # 评估出错时不重规划
+        return {
+            "need_replan": False,
+            "replan_reason": f"评估出错: {str(e)}",
+            "iteration_count": state.get('iteration_count', 0)
+        }
+
+
+async def replan_node(llm, state: ChatAgentState) -> Dict[str, Any]:
+    """重规划节点 - 根据评估反馈重新规划
+
+    当行程质量不达标时触发，会：
+    1. 根据评估建议调整策略
+    2. 增加迭代计数
+    3. 准备重规划所需的上下文
+
+    Returns:
+        清空部分状态，准备重新进入规划流程
+    """
+    try:
+        print("\n[Replan] 准备重新规划...")
+
+        reason = state.get('replan_reason', '质量不达标')
+        metrics = state.get('plan_metrics', {})
+        iteration = state.get('iteration_count', 0)
+
+        print(f"[Replan] 原因: {reason}")
+        print(f"[Replan] 当前迭代次数: {iteration}")
+
+        if metrics.get('suggestions'):
+            print(f"[Replan] 改进建议: {', '.join(metrics['suggestions'])}")
+
+        # 重规划策略：保留用户需求，清空中间结果
+        return {
+            "attractions_data": [],  # 清空景点数据，让专家重新查询
+            "weather_data": [],       # 清空天气数据
+            "hotels_data": [],        # 清空酒店数据
+            "transport_data": [],     # 清空交通数据
+            "iteration_count": iteration,  # 保留迭代计数
+            "replan_attempts": state.get('replan_attempts', 0) + 1,  # 重规划尝试次数
+        }
+
+    except Exception as e:
+        print(f"[Replan] 错误: {str(e)}")
+        return {"iteration_count": state.get('iteration_count', 0) + 1}
+
+
+def create_smart_planning_graph(llm, tools):
+    """创建智能规划图 V2 - 支持并行执行和景点周边酒店搜索
+
+    架构优化：
+    ┌─────────────────────────────────────────────────────────┐
+    │  tool_selector (决策工具调用)                            │
+    │      ↓                                                  │
+    │  ┌──────────────────────────────────────┐               │
+    │  │      并行层（直接边触发并行）         │               │
+    │  │  attraction | weather | transport    │               │
+    │  │  (节点内部判断是否跳过)               │               │
+    │  └──────────────────────────────────────┘               │
+    │      ↓                                                  │
+    │  gather_first_batch (自动等待所有并行完成)               │
+    │      ↓                                                  │
+    │  hotel_expert (景点周边搜索，依赖景点坐标)                │
+    │      ↓                                                  │
+    │  plan_trip → reflection → END/replan                    │
+    └─────────────────────────────────────────────────────────┘
+
+    LangGraph 并行机制：
+    - 一个节点可以有多条直接出边，自动并行执行
+    - 所有并行节点的状态更新会在汇聚点自动合并
+
+    性能提升：
+    - 景点、天气、交通并行执行，节省 2/3 时间
+    - 酒店使用景点坐标进行周边搜索，更精准
+    """
+    from langgraph.graph import StateGraph, END
+
+    workflow = StateGraph(ChatAgentState)
+
+    # === 1. 工具选择器节点 ===
+    async def tool_selector(state):
+        return await tool_selector_node(llm, state)
+
+    workflow.add_node("tool_selector", tool_selector)
+
+    # === 2. 并行层节点 - 每个节点内部处理跳过逻辑 ===
+    async def attraction_expert_parallel(state):
+        """景点专家节点（支持跳过）"""
+        decisions = state.get('tool_decisions', {})
+        if not decisions.get('attraction', True):
+            print("[Attraction] 根据决策跳过景点查询")
+            return {"attractions_data": []}
+        # 执行景点查询
+        node = create_attraction_node(llm, tools)
+        return await node(state)
+
+    async def weather_expert_parallel(state):
+        """天气专家节点（支持跳过）"""
+        decisions = state.get('tool_decisions', {})
+        if not decisions.get('weather', True):
+            print("[Weather] 根据决策跳过天气查询")
+            return {"weather_data": []}
+        # 执行天气查询
+        node = create_weather_node(llm, tools)
+        return await node(state)
+
+    async def transport_expert_parallel(state):
+        """交通专家节点（支持跳过）"""
+        decisions = state.get('tool_decisions', {})
+        if not decisions.get('transport', True):
+            print("[Transport] 根据决策跳过交通查询")
+            return {"transport_data": []}
+        # 执行交通查询
+        node = create_transport_node_v3(llm, tools)
+        return await node(state)
+
+    workflow.add_node("attraction_expert", attraction_expert_parallel)
+    workflow.add_node("weather_expert", weather_expert_parallel)
+    workflow.add_node("transport_expert", transport_expert_parallel)
+
+    # === 3. 汇聚节点（LangGraph 自动等待所有并行完成） ===
+    async def gather_parallel_results(state):
+        """汇聚节点 - 等待并行层完成，准备酒店搜索"""
+        print("\n[Gather] 并行层完成，准备酒店搜索")
+        attractions = state.get('attractions_data', [])
+        if attractions:
+            print(f"[Gather] 已获取 {len(attractions)} 个景点，酒店将使用周边搜索")
+        else:
+            print("[Gather] 无景点数据，酒店将使用普通搜索")
+        return {}
+
+    workflow.add_node("gather_parallel_results", gather_parallel_results)
+
+    # === 4. 酒店节点（使用 V2，支持周边搜索） ===
+    async def hotel_expert_with_skip(state):
+        """酒店专家节点（支持跳过）"""
+        decisions = state.get('tool_decisions', {})
+        if not decisions.get('hotel', True):
+            print("[Hotel] 根据决策跳过酒店查询")
+            return {"hotels_data": []}
+        # 执行酒店查询（使用 V2，支持周边搜索）
+        node = create_hotel_node_v2(llm, tools)
+        return await node(state)
+
+    workflow.add_node("hotel_expert", hotel_expert_with_skip)
+
+    # === 5. 规划节点 ===
+    async def plan_node(state):
+        return await plan_trip_node(llm, state)
+
+    workflow.add_node("plan_trip", plan_node)
+
+    # === 6. 反思与重规划节点 ===
+    async def reflection(state):
+        return await reflection_node(llm, state)
+
+    async def replan(state):
+        return await replan_node(llm, state)
+
+    workflow.add_node("reflection", reflection)
+    workflow.add_node("replan", replan)
+
+    # === 7. 构建图 ===
+
+    # 入口：工具选择器
+    workflow.set_entry_point("tool_selector")
+
+    # tool_selector -> 三个并行节点（直接边，自动并行）
+    workflow.add_edge("tool_selector", "attraction_expert")
+    workflow.add_edge("tool_selector", "weather_expert")
+    workflow.add_edge("tool_selector", "transport_expert")
+
+    # 三个并行节点 -> 汇聚节点（LangGraph 自动等待所有完成）
+    workflow.add_edge("attraction_expert", "gather_parallel_results")
+    workflow.add_edge("weather_expert", "gather_parallel_results")
+    workflow.add_edge("transport_expert", "gather_parallel_results")
+
+    # 汇聚节点 -> 酒店节点
+    workflow.add_edge("gather_parallel_results", "hotel_expert")
+
+    # 酒店节点 -> 规划节点
+    workflow.add_edge("hotel_expert", "plan_trip")
+
+    # 规划节点 -> 反思节点
+    workflow.add_edge("plan_trip", "reflection")
+
+    # === 反思后的条件路由 ===
+    def route_after_reflection(state: ChatAgentState) -> str:
+        """反思节点后的路由：决定是否重规划"""
+        need_replan = state.get('need_replan', False)
+        iteration = state.get('iteration_count', 0)
+
+        if need_replan and iteration < 3:  # 最多重规划3次
+            print(f"[Reflection] 触发重规划（迭代{iteration}）")
+            return "replan"
+
+        print("[Reflection] 行程完成")
+        return "done"
+
+    workflow.add_conditional_edges(
+        "reflection",
+        route_after_reflection,
+        {"replan": "replan", "done": END}
+    )
+
+    # 重规划后回到工具选择器重新开始
+    workflow.add_edge("replan", "tool_selector")
+
+    # 编译图后返回
+    return workflow.compile()
+
+

@@ -11,9 +11,16 @@ ENV_FILE = PROJECT_ROOT / ".env"
 class Settings(BaseSettings):
     """应用配置"""
 
-    # API Keys
-    deepseek_api_key: Optional[str] = None
-    amap_maps_api_key: Optional[str] = None
+    # === 模型 API Keys ===
+    dashscope_api_key: Optional[str] = None     # 阿里云DashScope (Qwen3)
+    amap_maps_api_key: Optional[str] = None     # 高德地图 API
+
+    # === 模型选择 ===
+    primary_model: str = "qwen-plus"            # 主模型
+    llm_temperature: float = 0.7                # 模型温度
+
+    # === MCP 配置 ===
+    mcp_config_path: str = "backend/config/mcp_config.json"
 
     # 应用配置
     app_name: str = "Travel Planning Agent"
@@ -36,6 +43,7 @@ class Settings(BaseSettings):
         env_file = str(ENV_FILE)
         env_file_encoding = "utf-8"
         case_sensitive = False
+        extra = "ignore"  # 忽略 .env 中未定义的字段
 
 
 settings = Settings()

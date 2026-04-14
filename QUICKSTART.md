@@ -29,7 +29,7 @@ python -m venv .venv
 pip install -r backend/requirements.txt
 
 # 启动服务
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 后端运行在 http://localhost:8000
